@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frequency Recorder</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Frequency Recorder</h1>
+    <p class="sub">Record your screen with its internal audio and/or your microphone, with background noise removed. When a frequency you've named shows up in the audio, the app names it on screen, logs the time, and can mute it.</p>
+  </header>
+
+  <main>
+    <section class="card" id="capture-card">
+      <h2>1. Capture</h2>
+      <div class="row">
+        <button id="btn-capture" class="primary">Share screen + internal audio</button>
+        <button id="btn-mic">Add microphone (external audio)</button>
+        <button id="btn-test">Play test tones</button>
+        <button id="btn-release" disabled>Stop all</button>
+      </div>
+      <div class="row options">
+        <span id="sources" class="muted">No sources yet.</span>
+      </div>
+      <div class="row options">
+        <label><input type="checkbox" id="opt-monitor"> Hear processed audio (use headphones)</label>
+        <label><input type="checkbox" id="opt-audio-only"> Record audio only</label>
+      </div>
+      <p class="hint" id="capture-hint">In the share dialog, pick a tab, window or screen and turn on <b>Share audio</b> (system audio works for whole screens on Windows/ChromeOS; on macOS and Linux, share a browser tab to get its audio). You can also record just the microphone without sharing a screen.</p>
+    </section>
+
+    <section class="card" id="noise-card">
+      <h2>Background noise removal</h2>
+      <div class="row options">
+        <label><input type="checkbox" id="opt-dn-mic" checked> Clean up microphone</label>
+        <label><input type="checkbox" id="opt-dn-int"> Clean up internal audio</label>
+        <label><input type="checkbox" id="opt-hp" checked> Cut low rumble (below 80 Hz, mic)</label>
+        <label><input type="checkbox" id="opt-browser-ns" checked> Browser noise suppression + echo cancel (mic)</label>
+      </div>
+      <div class="sliders">
+        <label>Strength <output id="out-dn-strength"></output>
+          <input type="range" id="opt-dn-strength" min="0.5" max="4" step="0.1">
+          <small>Higher removes more noise but can make voices sound thin.</small>
+        </label>
+        <label>Max reduction <output id="out-dn-floor"></output>
+          <input type="range" id="opt-dn-floor" min="-40" max="-6" step="1">
+          <small>How far noise can be turned down.</small>
+        </label>
+      </div>
+      <div class="row">
+        <button id="btn-learn">Learn noise (stay quiet 2 s)</button>
+        <button id="btn-forget" disabled>Back to automatic</button>
+        <span id="dn-mode" class="muted">Mode: automatic (tracks the background noise as it goes)</span>
+      </div>
+    </section>
+
+    <section class="card" id="preview-card">
+      <div class="preview-wrap">
+        <canvas id="preview" width="1280" height="720"></canvas>
+        <div id="rec-badge" hidden>● REC <span id="rec-time">00:00</span></div>
+      </div>
+      <div class="now">
+        <div>
+          <div class="label">Now hearing</div>
+          <div id="now-names" class="names">—</div>
+        </div>
+        <div>
+          <div class="label">Loudest frequency</div>
+          <div id="now-peak" class="peak">—</div>
+        </div>
+        <div>
+          <div class="label">Level</div>
+          <div id="now-level" class="peak">—</div>
+        </div>
+      </div>
+      <div class="row">
+        <button id="btn-record" class="primary" disabled>● Record</button>
+        <button id="btn-stop" disabled>■ Stop</button>
+        <label><input type="checkbox" id="opt-burn" checked> Show names on the video</label>
+      </div>
+    </section>
+
+    <section class="card" id="targets-card">
+      <h2>2. Named frequencies</h2>
+      <table class="targets">
+        <thead><tr><th>Name</th><th>Hz</th><th>± Hz</th><th title="Silence the recording while this frequency is present">Mute</th><th></th></tr></thead>
+        <tbody id="targets-body"></tbody>
+      </table>
+      <div class="row">
+        <button id="btn-add-custom">+ Add custom</button>
+        <button id="btn-clear-targets">Clear all</button>
+      </div>
+
+      <h3>Built-in frequencies</h3>
+      <div class="library-controls">
+        <input type="search" id="library-search" placeholder="Search built-ins (e.g. hum, DTMF, alarm)">
+      </div>
+      <div id="library"></div>
+
+      <h3>Add a musical note</h3>
+      <div class="row">
+        <select id="note-name"></select>
+        <select id="note-octave"></select>
+        <span id="note-freq" class="muted"></span>
+        <button id="btn-add-note">Add note</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3. Sensitivity</h2>
+      <div class="sliders">
+        <label>Tone strength <output id="out-threshold"></output>
+          <input type="range" id="opt-threshold" min="0.05" max="0.9" step="0.01">
+          <small>How much of the sound must be at that frequency. Lower catches tones under music/speech; higher avoids false matches.</small>
+        </label>
+        <label>Minimum level <output id="out-mindb"></output>
+          <input type="range" id="opt-mindb" min="-90" max="-10" step="1">
+          <small>Ignore audio quieter than this.</small>
+        </label>
+        <label>Hold <output id="out-hold"></output>
+          <input type="range" id="opt-hold" min="0" max="2000" step="50">
+          <small>Keep the name (and mute) on this long after the tone stops.</small>
+        </label>
+      </div>
+      <canvas id="spectrum" width="1200" height="220"></canvas>
+    </section>
+
+    <section class="card">
+      <h2>4. Detections</h2>
+      <div class="row">
+        <button id="btn-log-csv">Download log (.csv)</button>
+        <button id="btn-log-clear">Clear log</button>
+      </div>
+      <div class="log-wrap">
+        <table class="log">
+          <thead><tr><th>Name</th><th>Hz</th><th>Start</th><th>End</th><th>Length</th></tr></thead>
+          <tbody id="log-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>5. Recordings</h2>
+      <p class="hint">Each recording comes with a subtitle file (.vtt / .srt) of the names detected, so players can show them even if you turned off names on the video.</p>
+      <div id="recordings"><p class="muted">Nothing recorded yet.</p></div>
+    </section>
+  </main>
+
+  <div id="toast" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
