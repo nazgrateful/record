@@ -67,6 +67,10 @@ button.small { padding: 3px 9px; font-size: 13px; }
 }
 
 .now { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 12px; margin-top: 12px; }
+.beat-cell { grid-column: 1 / -1; }
+#now-beat b { font-size: 18px; }
+.beat-use { font-size: 13px; }
+.recording .button-link { font-weight: 600; }
 .label { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .names { font-size: 20px; font-weight: 700; color: var(--hit); min-height: 30px; }
 .names.none { color: var(--muted); font-weight: 400; }

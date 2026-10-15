@@ -20,9 +20,22 @@ specific frequencies** when they show up in the audio.
   - goes into a timestamped detection log (exportable as CSV),
   - goes into subtitle files (.vtt / .srt) saved with each recording.
   - Optionally **mutes** the recording while that frequency is present.
+- **Saving without losing data**:
+  - Every recording is saved on the website (in the browser's storage)
+    automatically, written every second while recording. If the tab crashes
+    or closes, it's recovered the next time you open the page. The app asks
+    the browser to treat this storage as permanent.
+  - "Also save to a file on my computer" (Chrome/Edge) writes the recording
+    into a file you pick, as it records. Any saved recording can also be
+    downloaded with its subtitles, or deleted.
+- **Binaural-beat meter**: shows the difference between the left- and
+  right-ear tones (how Robert Monroe's Hemi-Sync works), with its brainwave
+  band and use.
 - **Built-in frequency library** you can add with one click: beeps and test tones,
   mains hum (50/60 Hz and harmonics), alarms and emergency alert tones,
   telephone tones, DTMF keypad tones, musical tuning, near-ultrasonic tones,
+  spiritual frequencies (Solfeggio, angel numbers, 432 Hz, OM and planetary
+  tones, 40 Hz), Robert Monroe / Hemi-Sync example binaural pairs,
   plus a **musical note picker** (C0–B8).
 - Live spectrum and the loudest frequency right now, with its note name.
 - "Play test tones" lets you try everything without sharing anything.
@@ -59,4 +72,10 @@ microphone still works there.
 - `freq-guard-worklet.js`: detects the named frequencies (Goertzel algorithm)
   and handles muting.
 - `denoise-worklet.js`: FFT-based background noise removal.
-- `presets.js`: built-in frequency library and note helpers.
+- `presets.js`: built-in frequency library, note helpers and brainwave bands.
+- `db.js`: saved-recordings library (IndexedDB) with crash recovery.
+
+Note: the uses listed for spiritual and Hemi-Sync frequencies are the
+traditional or popular claims attached to them, not scientifically established
+effects. The Monroe Institute's exact per-programme tones are proprietary; the
+built-in pairs are published examples.

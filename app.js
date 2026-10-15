@@ -1,4 +1,5 @@
-import { PRESET_LIBRARY, NOTE_NAMES, noteToFreq, freqToNote } from './presets.js';
+import { PRESET_LIBRARY, NOTE_NAMES, noteToFreq, freqToNote, beatBand } from './presets.js';
+import * as store from './db.js';
 
 const $ = (id) => document.getElementById(id);
 const COLORS = ['#ff6b6b', '#4dabf7', '#ffd43b', '#69db7c', '#da77f2', '#ff922b', '#38d9a9', '#f783ac'];
@@ -74,6 +75,13 @@ async function ensureAudio() {
   intIn.connect(dnInt).connect(mix);
   micIn.connect(highpass).connect(dnMic).connect(mix);
   mix.connect(analyser);
+  // Per-ear analysers with fine resolution (~1.5 Hz/bin) for the binaural-beat meter.
+  const splitter = ctx.createChannelSplitter(2);
+  const earL = ctx.createAnalyser(), earR = ctx.createAnalyser();
+  for (const an of [earL, earR]) { an.fftSize = 32768; an.smoothingTimeConstant = 0.5; }
+  mix.connect(splitter);
+  splitter.connect(earL, 0);
+  splitter.connect(earR, 1);
   mix.connect(guard);
   guard.connect(recDest);
   // Always connected to the speakers (at zero gain unless monitoring) so the
@@ -95,7 +103,7 @@ async function ensureAudio() {
     };
   }
 
-  nodes = { intIn, micIn, highpass, dnInt, dnMic, mix, analyser, guard, recDest, monitor };
+  nodes = { intIn, micIn, highpass, dnInt, dnMic, mix, analyser, earL, earR, guard, recDest, monitor };
   sendGuardConfig();
   sendDenoiseConfig();
   applyMonitor();
@@ -321,8 +329,39 @@ const sctx = spectrum.getContext('2d');
 let freqData = null;
 let peak = null;
 
+// Binaural beat: the strongest tone in each ear (20-1500 Hz). If they differ by
+// 0.5-45 Hz, that difference is the beat the listener's brain perceives.
+let beat = null;
+let earData = null;
+function earPeak(an, data) {
+  an.getFloatFrequencyData(data);
+  const binHz = ctx.sampleRate / an.fftSize;
+  const lo = Math.ceil(20 / binHz), hi = Math.floor(1500 / binHz);
+  let best = lo;
+  for (let i = lo + 1; i <= hi; i++) if (data[i] > data[best]) best = i;
+  if (data[best] < -70) return null;
+  const a = data[best - 1], b = data[best], c = data[best + 1];
+  const shift = (a - c) / (2 * (a - 2 * b + c)) || 0;
+  return (best + shift) * binHz;
+}
+function readBeat() {
+  if (!earData) earData = [new Float32Array(nodes.earL.frequencyBinCount), new Float32Array(nodes.earR.frequencyBinCount)];
+  const fl = earPeak(nodes.earL, earData[0]);
+  const fr = earPeak(nodes.earR, earData[1]);
+  const diff = fl && fr ? Math.abs(fl - fr) : 0;
+  beat = diff >= 0.5 && diff < 45 ? { hz: diff, fl, fr, band: beatBand(diff) } : null;
+  const el = $('now-beat');
+  if (beat) {
+    el.innerHTML = '<b></b> <span class="muted"></span><div class="muted beat-use"></div>';
+    el.querySelector('b').textContent = `${beat.hz.toFixed(1)} Hz ${beat.band.name}`;
+    el.querySelector('span').textContent = `(left ${fmtHz(fl)} / right ${fmtHz(fr)})`;
+    el.querySelector('.beat-use').textContent = beat.band.use;
+  } else el.textContent = '—';
+}
+
 function onTick() {
   readSpectrum();
+  readBeat();
   drawPreview();
   drawSpectrum();
   if (recorder) $('rec-time').textContent = fmtTime((performance.now() - recorder.startedAt) / 1000);
@@ -368,19 +407,20 @@ function drawPreview() {
 }
 
 function drawLabels(g, w, h) {
-  const names = currentNames();
+  const names = currentNames().map((t) => ({ text: `${t.name} · ${fmtHz(t.freq)}`, color: colorFor(t) }));
+  if (beat) names.unshift({ text: `Binaural beat ${beat.hz.toFixed(1)} Hz · ${beat.band.name}`, color: '#b197fc' });
   if (!names.length) return;
   const size = Math.max(18, Math.round(h / 22));
   g.font = `700 ${size}px system-ui, sans-serif`;
   g.textBaseline = 'middle';
   let y = h - size * 1.6;
   for (const t of names.slice().reverse()) {
-    const text = `${t.name} · ${fmtHz(t.freq)}`;
+    const text = t.text;
     const tw = g.measureText(text).width;
     const pad = size * 0.5;
     g.fillStyle = 'rgba(0,0,0,0.72)';
     roundRect(g, size * 0.8, y - size * 0.75, tw + pad * 2 + size * 0.9, size * 1.5, size * 0.35);
-    g.fillStyle = colorFor(t);
+    g.fillStyle = t.color;
     g.beginPath();
     g.arc(size * 0.8 + pad + size * 0.3, y, size * 0.28, 0, Math.PI * 2);
     g.fill();
@@ -449,8 +489,10 @@ function drawSpectrum() {
 // ------------------------------------------------------------- recording --
 
 let recorder = null;
-const recordings = [];
+let library = [];          // saved recordings (metadata) from IndexedDB
+const mediaUrls = new Map(); // recording id -> { media, vtt, srt } object URLs
 const log = [];
+let storageWarned = false;
 
 function pickMime(audioOnly) {
   const list = audioOnly
@@ -459,9 +501,54 @@ function pickMime(audioOnly) {
   return list.find((m) => MediaRecorder.isTypeSupported(m)) || '';
 }
 
-function startRecording() {
+function extFor(mimeType, audioOnly) {
+  if (mimeType.includes('mp4')) return audioOnly ? 'm4a' : 'mp4';
+  return mimeType.includes('ogg') ? 'ogg' : 'webm';
+}
+
+function buildCues(startedAt, stoppedAt) {
+  return log
+    .filter((e) => (e.end ?? stoppedAt) > startedAt && e.start < stoppedAt)
+    .map((e) => ({
+      text: `${e.name} (${fmtHz(e.freq)})`,
+      start: Math.max(0, (e.start - startedAt) / 1000),
+      end: Math.max(0.1, (Math.min(e.end ?? stoppedAt, stoppedAt) - startedAt) / 1000),
+    }));
+}
+
+function storageFailed(err) {
+  if (recorder) recorder.storageOk = false;
+  if (!storageWarned) {
+    storageWarned = true;
+    toast(`Couldn't save to this website's storage (${err && err.message}). The recording is kept in memory; download it before closing the tab.`, 10000);
+  }
+}
+
+async function startRecording() {
   if (!nodes || recorder) return;
   const audioOnly = $('opt-audio-only').checked;
+  const mimeType = pickMime(audioOnly);
+  const ext = extFor(mimeType, audioOnly);
+  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+  const name = `recording-${stamp}`;
+
+  // Optional: write straight into a file on the computer while recording.
+  let fileWriter = null;
+  if ($('opt-save-disk').checked && window.showSaveFilePicker) {
+    try {
+      const base = mimeType.split(';')[0] || (audioOnly ? 'audio/webm' : 'video/webm');
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `${name}.${ext}`,
+        types: [{ description: audioOnly ? 'Audio' : 'Video', accept: { [base]: ['.' + ext] } }],
+      });
+      fileWriter = await handle.createWritable();
+    } catch (err) {
+      if (err.name === 'AbortError') return; // user cancelled the save dialog
+      toast('Could not open the file on your computer: ' + err.message + '. Recording to the website only.', 7000);
+    }
+  }
+  store.requestPersistence().then(renderStorageInfo).catch(() => {});
+
   const tracks = [...nodes.recDest.stream.getAudioTracks()];
   let usesDisplayTrack = false;
   if (!audioOnly) {
@@ -472,64 +559,115 @@ function startRecording() {
       tracks.push(preview.captureStream(30).getVideoTracks()[0]);
     }
   }
-  const mimeType = pickMime(audioOnly);
   let mr;
   try {
     mr = new MediaRecorder(new MediaStream(tracks), mimeType ? { mimeType } : undefined);
   } catch (err) {
+    fileWriter && fileWriter.abort().catch(() => {});
     toast('Could not start recording: ' + err.message, 6000);
     return;
   }
-  const chunks = [];
-  mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  mr.onstop = () => finishRecording(chunks, mr.mimeType || mimeType, audioOnly);
+
+  const startedAt = performance.now();
+  const rec = {
+    id: uid(), name, ext, mime: mr.mimeType || mimeType, audioOnly,
+    createdAt: Date.now(), seconds: 0, size: 0, cues: [], complete: false,
+  };
+  const r = {
+    mr, rec, startedAt, usesDisplayTrack, fileWriter, storageOk: true,
+    canvasTrack: usesDisplayTrack || audioOnly ? null : tracks[tracks.length - 1],
+    pending: new Map(), // chunks not yet confirmed saved, by sequence number
+    seq: 0,
+    saveChain: store.putRecording(rec).catch(storageFailed),
+    diskChain: Promise.resolve(),
+  };
+  recorder = r;
+
+  mr.ondataavailable = (e) => {
+    if (!e.data.size) return;
+    const blob = e.data, seq = r.seq++;
+    r.pending.set(seq, blob);
+    rec.size += blob.size;
+    rec.seconds = (performance.now() - startedAt) / 1000;
+    r.saveChain = r.saveChain
+      .then(() => (r.storageOk ? store.putChunk(rec.id, seq, blob) : Promise.reject(null)))
+      .then(() => {
+        r.pending.delete(seq);
+        if (seq % 5 === 0) {
+          return store.updateRecording(rec.id, { size: rec.size, seconds: rec.seconds, cues: buildCues(startedAt, performance.now()) });
+        }
+      })
+      .catch((err) => err && storageFailed(err));
+    if (r.fileWriter) {
+      r.diskChain = r.diskChain.then(() => r.fileWriter && r.fileWriter.write(blob)).catch((err) => {
+        r.fileWriter = null;
+        toast('Writing to the file on your computer failed: ' + err.message + '. It is still saved on the website.', 8000);
+      });
+    }
+  };
+  mr.onstop = () => finishRecording(r);
   mr.start(1000);
-  recorder = { mr, startedAt: performance.now(), usesDisplayTrack, canvasTrack: usesDisplayTrack || audioOnly ? null : tracks[tracks.length - 1] };
+
   $('rec-badge').hidden = false;
   $('btn-stop').disabled = false;
-  $('opt-audio-only').disabled = true;
-  $('opt-burn').disabled = true;
+  for (const id of ['opt-audio-only', 'opt-burn', 'opt-save-disk']) $(id).disabled = true;
   updateSources();
 }
 
 function stopRecording() {
-  if (!recorder) return;
+  if (!recorder || recorder.stoppedAt) return;
   recorder.stoppedAt = performance.now();
   recorder.mr.stop();
 }
 
-function finishRecording(chunks, mimeType, audioOnly) {
-  const { startedAt, stoppedAt = performance.now(), canvasTrack } = recorder;
+async function finishRecording(r) {
+  const { rec, startedAt, stoppedAt = performance.now(), canvasTrack } = r;
   canvasTrack && canvasTrack.stop();
   recorder = null;
   $('rec-badge').hidden = true;
   $('btn-stop').disabled = true;
-  $('opt-audio-only').disabled = false;
-  $('opt-burn').disabled = false;
+  for (const id of ['opt-audio-only', 'opt-burn', 'opt-save-disk']) $(id).disabled = false;
   updateSources();
 
-  const blob = new Blob(chunks, { type: mimeType.split(';')[0] });
-  const ext = mimeType.includes('mp4') ? (audioOnly ? 'm4a' : 'mp4') : mimeType.includes('ogg') ? 'ogg' : 'webm';
-  const cues = log
-    .filter((e) => (e.end ?? stoppedAt) > startedAt && e.start < stoppedAt)
-    .map((e) => ({
-      text: `${e.name} (${fmtHz(e.freq)})`,
-      start: Math.max(0, (e.start - startedAt) / 1000),
-      end: Math.max(0.1, ((e.end ?? stoppedAt) - startedAt) / 1000),
-    }));
-  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-  recordings.unshift({
-    name: `recording-${stamp}`,
-    ext,
-    url: URL.createObjectURL(blob),
-    vtt: URL.createObjectURL(new Blob([toVtt(cues)], { type: 'text/vtt' })),
-    srt: URL.createObjectURL(new Blob([toSrt(cues)], { type: 'text/plain' })),
-    audioOnly,
-    seconds: (stoppedAt - startedAt) / 1000,
-    size: blob.size,
-    cues: cues.length,
-  });
-  renderRecordings();
+  rec.seconds = (stoppedAt - startedAt) / 1000;
+  rec.cues = buildCues(startedAt, stoppedAt);
+  rec.complete = true;
+
+  await r.saveChain;
+  let savedToSite = r.storageOk;
+  if (savedToSite) {
+    try {
+      await store.updateRecording(rec.id, { size: rec.size, seconds: rec.seconds, cues: rec.cues, complete: true });
+    } catch (err) {
+      storageFailed(err);
+      savedToSite = false;
+    }
+  }
+
+  let savedToDisk = false;
+  await r.diskChain;
+  if (r.fileWriter) {
+    try {
+      await r.fileWriter.close();
+      savedToDisk = true;
+    } catch (err) {
+      toast('Finishing the file on your computer failed: ' + err.message, 8000);
+    }
+  }
+
+  if (!savedToSite) {
+    // Keep it in memory, combining what did get stored with what didn't.
+    const stored = await store.getChunkRows(rec.id).catch(() => []);
+    const all = new Map(stored.map((c) => [c.seq, c.blob]));
+    for (const [seq, blob] of r.pending) all.set(seq, blob);
+    const blob = new Blob([...all.keys()].sort((a, b) => a - b).map((k) => all.get(k)), { type: rec.mime.split(';')[0] });
+    rec.memoryBlob = blob;
+    rec.unsaved = true;
+  }
+  if (savedToSite || savedToDisk) {
+    toast(`Saved ${rec.name}` + (savedToSite ? ' to this website' : '') + (savedToSite && savedToDisk ? ' and' : '') + (savedToDisk ? ' to your computer' : '') + '.');
+  }
+  await refreshLibrary(savedToSite ? [] : [rec]);
 }
 
 function toVtt(cues) {
@@ -541,33 +679,110 @@ function toSrt(cues) {
   return cues.map((c, i) => `${i + 1}\n${t(c.start)} --> ${t(c.end)}\n${c.text}\n`).join('\n');
 }
 
-function renderRecordings() {
+// Recordings left incomplete by a crash or closed tab: keep what was saved.
+async function recoverInterrupted() {
+  for (const rec of await store.listRecordings()) {
+    if (rec.complete) continue;
+    const rows = await store.getChunkRows(rec.id);
+    if (!rows.length) {
+      await store.deleteRecording(rec.id);
+      continue;
+    }
+    const size = rows.reduce((n, c) => n + c.blob.size, 0);
+    await store.updateRecording(rec.id, { complete: true, recovered: true, size, seconds: Math.max(rec.seconds, rows.length) });
+    toast(`Recovered "${rec.name}" from an interrupted session.`, 7000);
+  }
+}
+
+async function refreshLibrary(extra = []) {
+  const unsaved = library.filter((r) => r.unsaved);
+  try {
+    library = [...extra, ...unsaved, ...(await store.listRecordings())].filter((r, i, a) => a.findIndex((x) => x.id === r.id) === i);
+  } catch (err) {
+    library = [...extra, ...unsaved];
+  }
+  await renderRecordings();
+  renderStorageInfo();
+}
+
+async function urlsFor(rec) {
+  let u = mediaUrls.get(rec.id);
+  if (!u) {
+    const blob = rec.memoryBlob || (await store.getBlob(rec));
+    const cues = Array.isArray(rec.cues) ? rec.cues : [];
+    u = {
+      media: URL.createObjectURL(blob),
+      vtt: URL.createObjectURL(new Blob([toVtt(cues)], { type: 'text/vtt' })),
+      srt: URL.createObjectURL(new Blob([toSrt(cues)], { type: 'text/plain' })),
+    };
+    mediaUrls.set(rec.id, u);
+  }
+  return u;
+}
+
+async function renderRecordings() {
   const box = $('recordings');
-  box.innerHTML = '';
-  for (const r of recordings) {
+  if (!library.length) {
+    box.innerHTML = '<p class="muted">Nothing recorded yet.</p>';
+    return;
+  }
+  const rows = [];
+  for (const rec of library) {
+    if (recorder && recorder.rec.id === rec.id) continue;
+    let u;
+    try { u = await urlsFor(rec); } catch { continue; }
+    const cues = Array.isArray(rec.cues) ? rec.cues.length : 0;
     const row = document.createElement('div');
     row.className = 'recording';
-    const media = document.createElement(r.audioOnly ? 'audio' : 'video');
+    const media = document.createElement(rec.audioOnly ? 'audio' : 'video');
     media.controls = true;
-    media.src = r.url;
-    if (!r.audioOnly) {
+    media.preload = 'metadata';
+    media.src = u.media;
+    if (!rec.audioOnly) {
       const track = document.createElement('track');
       track.kind = 'subtitles';
       track.label = 'Detected frequencies';
-      track.src = r.vtt;
+      track.src = u.vtt;
       media.appendChild(track);
     }
     const info = document.createElement('div');
-    info.innerHTML = `<div><b>${r.name}.${r.ext}</b></div>
-      <div class="muted">${fmtTime(r.seconds)} · ${(r.size / 1048576).toFixed(1)} MB · ${r.cues} detection${r.cues === 1 ? '' : 's'}</div>
+    info.innerHTML = `<div><b class="rec-name"></b></div>
+      <div class="muted">${new Date(rec.createdAt).toLocaleString()} · ${fmtTime(rec.seconds)} · ${(rec.size / 1048576).toFixed(1)} MB · ${cues} detection${cues === 1 ? '' : 's'}</div>
+      <div class="muted rec-status"></div>
       <div class="links row">
-        <a download="${r.name}.${r.ext}" href="${r.url}">Download recording</a>
-        <a download="${r.name}.vtt" href="${r.vtt}">Subtitles (.vtt)</a>
-        <a download="${r.name}.srt" href="${r.srt}">Subtitles (.srt)</a>
+        <a class="button-link" download="${rec.name}.${rec.ext}" href="${u.media}">Download recording</a>
+        <a download="${rec.name}.vtt" href="${u.vtt}">Subtitles (.vtt)</a>
+        <a download="${rec.name}.srt" href="${u.srt}">Subtitles (.srt)</a>
+        <button class="small" data-del>Delete</button>
       </div>`;
+    info.querySelector('.rec-name').textContent = `${rec.name}.${rec.ext}`;
+    info.querySelector('.rec-status').textContent = rec.unsaved
+      ? '⚠ Not saved on the website (storage failed) — download it before closing this tab.'
+      : rec.recovered
+        ? '✓ Saved on this website · recovered after an interruption'
+        : '✓ Saved on this website';
+    info.querySelector('[data-del]').addEventListener('click', async () => {
+      if (!confirm(`Delete ${rec.name}.${rec.ext} from this website? Copies you downloaded are not affected.`)) return;
+      if (!rec.unsaved) await store.deleteRecording(rec.id);
+      const old = mediaUrls.get(rec.id);
+      if (old) Object.values(old).forEach((x) => URL.revokeObjectURL(x));
+      mediaUrls.delete(rec.id);
+      library = library.filter((x) => x.id !== rec.id);
+      await refreshLibrary();
+    });
     row.append(media, info);
-    box.appendChild(row);
+    rows.push(row);
   }
+  box.replaceChildren(...rows);
+}
+
+async function renderStorageInfo() {
+  const el = $('storage-info');
+  const info = await store.storageInfo().catch(() => null);
+  if (!info) { el.textContent = ''; return; }
+  const gb = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${(b / 1048576).toFixed(0)} MB`);
+  el.textContent = `Website storage: ${gb(info.usage)} used of ${gb(info.quota)} available · ` +
+    (info.persisted ? 'protected from automatic cleanup ✓' : 'the browser may clear it if your disk gets full — download important recordings');
 }
 
 // ------------------------------------------------------------------- log --
@@ -803,9 +1018,20 @@ function init() {
   updateSources();
   pctx.fillStyle = '#0d0f13';
   pctx.fillRect(0, 0, preview.width, preview.height);
+
+  if (!window.showSaveFilePicker) {
+    $('opt-save-disk').checked = false;
+    $('opt-save-disk').disabled = true;
+    $('save-disk-label').title = 'Your browser can\'t write files directly; use the Download buttons instead.';
+    $('save-disk-label').classList.add('muted');
+  }
+  window.addEventListener('beforeunload', (e) => {
+    if (recorder || library.some((r) => r.unsaved)) { e.preventDefault(); e.returnValue = ''; }
+  });
+  recoverInterrupted().catch(() => {}).finally(() => refreshLibrary());
 }
 
 init();
 
 // Exposed for automated tests.
-window.__freqRecorder = { settings, detected, log, recordings, startTones, stopTones, startRecording, stopRecording, ensureAudio, get nodes() { return nodes; } };
+window.__freqRecorder = { settings, detected, log, store, get library() { return library; }, startTones, stopTones, startRecording, stopRecording, ensureAudio, get nodes() { return nodes; } };
