@@ -74,11 +74,16 @@
           <div class="label">Level</div>
           <div id="now-level" class="peak">—</div>
         </div>
+        <div class="beat-cell">
+          <div class="label" title="Difference between the tones in your left and right ear (Hemi-Sync / binaural beats)">Binaural beat</div>
+          <div id="now-beat">—</div>
+        </div>
       </div>
       <div class="row">
         <button id="btn-record" class="primary" disabled>● Record</button>
         <button id="btn-stop" disabled>■ Stop</button>
         <label><input type="checkbox" id="opt-burn" checked> Show names on the video</label>
+        <label id="save-disk-label"><input type="checkbox" id="opt-save-disk"> Also save to a file on my computer</label>
       </div>
     </section>
 
@@ -142,8 +147,9 @@
     </section>
 
     <section class="card">
-      <h2>5. Recordings</h2>
-      <p class="hint">Each recording comes with a subtitle file (.vtt / .srt) of the names detected, so players can show them even if you turned off names on the video.</p>
+      <h2>5. Saved recordings</h2>
+      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. Download them to keep copies on your computer. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
+      <p class="hint" id="storage-info"></p>
       <div id="recordings"><p class="muted">Nothing recorded yet.</p></div>
     </section>
   </main>
