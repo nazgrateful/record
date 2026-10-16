@@ -19,6 +19,7 @@ const defaults = {
   dnFloorDb: -24,
   micGainDb: 0,
   hum: 0,                  // live mains hum filter: 0 (off), 50 or 60 Hz
+  toneLayers: [],          // editor "Add frequencies" layers
   mode: 'combined',        // combined | separate | audio | video
   autoDownload: true,
   saveFolder: false,
@@ -1609,6 +1610,8 @@ function init() {
     denoiseSettings: () => ({ strength: settings.dnStrength, floor: Math.pow(10, settings.dnFloorDb / 20) }),
     saveStream,
     saveOriginal,
+    settings,
+    saveSettings,
   });
 }
 

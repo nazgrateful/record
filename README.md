@@ -55,6 +55,15 @@ specific frequencies** when they show up in the audio.
     selection / silence, with undo and redo.
   - Effects on the selection (or everything): fade in/out, normalize, change
     volume, reverse, and noise removal (optionally learned from a selection).
+  - **Add frequencies**: layer tones from your named frequencies, the
+    built-in library (Solfeggio, 432 Hz, planetary, Hemi-Sync…), ready-made
+    binaural beats, or any Hz. Each layer has its own wave (sine, triangle,
+    square, sawtooth), volume and an optional different right-ear frequency
+    (binaural beat). Mix them into the selection or the whole audio (keeping,
+    lowering or replacing the original), or insert them at the cursor; fades
+    avoid clicks; preview first. **New audio from frequencies** starts from
+    silence of any length (e.g. a 1-hour 432 Hz track). **Remove this
+    frequency** (and optionally its harmonics) with narrow notch filters.
   - **Check audio health** finds clipping, quiet or loud audio, noise, hum,
     rumble, DC offset, one-sided or out-of-phase stereo and silent ends, and
     fixes them in one click.
@@ -134,6 +143,7 @@ microphone still works there.
 - `editor.js`: the audio editor. `pcm.js`: block storage for long audio.
 - `decoders.js`: streaming import (WAV, WebM/MKV, Ogg, MP3, MP4/M4A).
 - `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
+- `tones.js`: tone / binaural-beat generator for Add frequencies.
 - `health.js`: the audio health check and sound check suggestions.
 - `tap-worklet.js`: hands live audio to the sound check.
 - `tests/upgrade-check.mjs`: checks updates keep all saved data (`npm run test:upgrade`).

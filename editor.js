@@ -11,6 +11,8 @@ import * as pcm from './pcm.js';
 import { decodeFile } from './decoders.js';
 import { encode, docSource, formatById, FORMATS, supportedFormats, downloadParts } from './export.js';
 import { analyze, suggestions } from './health.js';
+import { addTones, describe, WAVES, BINAURAL_PRESETS } from './tones.js';
+import { PRESET_LIBRARY } from './presets.js';
 
 const $ = (id) => document.getElementById(id);
 const UNDO_LIMIT = 50;
@@ -43,6 +45,7 @@ export function initEditor(d) {
 
   setupWave();
   setupOverview();
+  setupTones();
 
   const actions = {
     'ed-play': () => (playing ? stop() : play(false)),
@@ -79,6 +82,9 @@ export function initEditor(d) {
     'ed-download': download,
     'ed-close': close,
     'ed-health': checkHealth,
+    'ed-tones-apply': applyTones,
+    'ed-tones-preview': previewTones,
+    'ed-notch-btn': removeFrequency,
   };
   for (const [id, fn] of Object.entries(actions)) {
     $(id).addEventListener('click', () => { if (doc && !busy) fn(); });
@@ -109,11 +115,17 @@ export function initEditor(d) {
 // ------------------------------------------------------------- loading --
 
 // Opens a file or a Blob (e.g. a saved recording) in the editor.
-export async function openFile(file, baseName) {
-  if (busy) return deps.toast('Wait for the current job to finish.');
-  if (doc && !confirm('Close the audio that is open in the editor? Save or download it first if you need it.')) return;
+// Closes what's open (after asking) so something else can be opened.
+async function makeRoom() {
+  if (busy) { deps.toast('Wait for the current job to finish.'); return false; }
+  if (doc && !confirm('Close the audio that is open in the editor? Save or download it first if you need it.')) return false;
   stop();
   if (doc) { await pcm.discardDoc(doc).catch(() => {}); doc = null; }
+  return true;
+}
+
+export async function openFile(file, baseName) {
+  if (!(await makeRoom())) return;
   const name = baseName || (file.name || 'audio').replace(/\.[^.]+$/, '');
   const mono = $('ed-mono').checked;
   let d = null, writer = null;
@@ -906,8 +918,12 @@ async function applyFix(action) {
 // Runs the whole recording through Web Audio filters (with some sound before
 // each piece so the filters are settled and pieces join seamlessly).
 function filterAll(label, build) {
+  return filterRange(label, 0, total, build);
+}
+
+function filterRange(label, a, b, build) {
   const PRE = Math.round(doc.rate * 1);
-  return rewrite(label, 0, total, async (pos, n) => {
+  return rewrite(label, a, b, async (pos, n) => {
     const pre = Math.min(PRE, pos);
     const input = await pcm.readRange(doc, pos - pre, n + pre);
     const oc = new OfflineAudioContext(doc.ch, n + pre, doc.rate);
@@ -922,6 +938,227 @@ function filterAll(label, build) {
     const r = await oc.startRendering();
     return input.map((_, c) => r.getChannelData(c).slice(pre));
   });
+}
+
+// ------------------------------------------------------- add frequencies --
+//
+// Layers of tones (from the named frequencies, the built-in library, binaural
+// presets or any Hz) mixed into the selection / whole recording, or inserted
+// at the cursor as new audio. A new, silent audio of any length can be made
+// to build a frequency track from scratch.
+
+let previewNodes = null;
+
+function layers() { return deps.settings.toneLayers; }
+function saveLayers() { deps.saveSettings(); renderLayers(); }
+
+function setupTones() {
+  const pick = $('ed-tones-add');
+  fillPicker();
+  // Refresh before it opens (the named frequencies may have changed).
+  pick.addEventListener('pointerenter', fillPicker);
+  pick.addEventListener('focus', fillPicker);
+  pick.addEventListener('change', () => {
+    const v = pick.value;
+    pick.value = '';
+    if (!v) return;
+    let layer;
+    if (v === 'custom') layer = { name: 'Custom tone', left: 432 };
+    else if (v.startsWith('bin:')) { const b = BINAURAL_PRESETS[+v.slice(4)]; layer = { name: b.name, left: b.left, right: b.right }; }
+    else { const [, f, ...name] = v.split(':'); layer = { name: name.join(':'), left: +f }; }
+    layers().push({ id: Math.random().toString(36).slice(2, 9), wave: 'sine', db: -18, right: 0, ...layer });
+    saveLayers();
+  });
+  $('ed-new-tones').addEventListener('click', newToneAudio);
+  for (const id of ['ed-tones-where', 'ed-tones-original']) $(id).addEventListener('change', updateTonesUi);
+  renderLayers();
+  updateTonesUi();
+}
+
+// The "+ Add a frequency" menu, refreshed each time (named frequencies change).
+function fillPicker() {
+  const pick = $('ed-tones-add');
+  const opt = (label, value) => new Option(label, value);
+  const group = (label, opts) => { const g = document.createElement('optgroup'); g.label = label; g.append(...opts); return g; };
+  const named = deps.settings.targets.filter((t) => t.freq > 0);
+  pick.replaceChildren(
+    opt('+ Add a frequency…', ''),
+    opt('Custom frequency (type any Hz)', 'custom'),
+    ...(named.length ? [group('My named frequencies', named.map((t) => opt(`${t.name} — ${hz(t.freq)}`, `f:${t.freq}:${t.name}`)))] : []),
+    group('Binaural beats (use headphones)', BINAURAL_PRESETS.map((b, i) => opt(b.name, `bin:${i}`))),
+    ...PRESET_LIBRARY.map((cat) => group(cat.category, cat.items.map((it) => opt(`${it.name} — ${hz(it.freq)}`, `f:${it.freq}:${it.name}`)))),
+  );
+}
+
+const hz = (f) => (f >= 1000 ? `${+(f / 1000).toFixed(2)} kHz` : `${+(+f).toFixed(2)} Hz`);
+
+function renderLayers() {
+  const body = $('ed-tones-body');
+  const list = layers();
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="6" class="muted">No frequencies yet: choose one from "+ Add a frequency".</td></tr>';
+  } else {
+    body.replaceChildren(...list.map((l) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><input type="text" data-k="name"></td>
+        <td><input type="number" data-k="left" min="1" max="24000" step="any" class="num"></td>
+        <td><input type="number" data-k="right" min="0" max="24000" step="any" class="num" placeholder="same"><div class="muted beat"></div></td>
+        <td><select data-k="wave"></select></td>
+        <td><input type="number" data-k="db" min="-60" max="0" step="1" class="num"></td>
+        <td><button class="small" data-del title="Remove">✕</button></td>`;
+      const $k = (k) => tr.querySelector(`[data-k=${k}]`);
+      $k('wave').append(...Object.entries(WAVES).map(([v, label]) => new Option(label, v)));
+      $k('name').value = l.name;
+      $k('left').value = l.left;
+      $k('right').value = l.right > 0 ? l.right : '';
+      $k('wave').value = l.wave;
+      $k('db').value = l.db;
+      tr.querySelector('.beat').textContent = describe(l);
+      $k('name').addEventListener('change', () => { l.name = $k('name').value; deps.saveSettings(); });
+      $k('left').addEventListener('change', () => { l.left = Math.max(1, +$k('left').value || 1); saveLayers(); });
+      $k('right').addEventListener('change', () => { l.right = Math.max(0, +$k('right').value || 0); saveLayers(); });
+      $k('wave').addEventListener('change', () => { l.wave = $k('wave').value; deps.saveSettings(); });
+      $k('db').addEventListener('change', () => { l.db = Math.min(0, Math.max(-60, +$k('db').value || -18)); saveLayers(); });
+      tr.querySelector('[data-del]').addEventListener('click', () => {
+        deps.settings.toneLayers = list.filter((x) => x !== l);
+        saveLayers();
+      });
+      return tr;
+    }));
+  }
+  $('ed-tones-apply').disabled = !list.length;
+  $('ed-tones-preview').disabled = !list.length;
+}
+
+function updateTonesUi() {
+  const insert = $('ed-tones-where').value === 'insert';
+  $('ed-tones-length-wrap').hidden = !insert;
+  $('ed-tones-original-wrap').hidden = insert;
+}
+
+async function applyTones() {
+  const list = layers().filter((l) => l.left > 0);
+  if (!list.length) return deps.toast('Add a frequency first.');
+  stop();
+  if (doc.ch < 2 && list.some((l) => l.right > 0)) {
+    deps.toast('This audio is mono, so binaural pairs are mixed into one channel (a pulsing beat). Import without "mono" for true binaural beats.', 8000);
+  }
+  const fade = Math.round(doc.rate * Math.max(0, +$('ed-tones-fade').value || 0));
+  const label = list.length === 1 ? `${list[0].name} (${hz(list[0].left)})` : `${list.length} frequencies`;
+  if ($('ed-tones-where').value === 'insert') {
+    const secs = parseTime($('ed-tones-length').value);
+    if (!(secs > 0)) return deps.toast('Type how long to insert, e.g. 30, 5:00 or 1:00:00.');
+    const n = Math.round(secs * doc.rate), at = selA;
+    let ok = false;
+    await job(`Making ${fmt(secs)} of ${label}…`, async (progress) => {
+      const writer = new pcm.BlockWriter(doc);
+      try {
+        for (let done = 0; done < n;) {
+          const k = Math.min(WIN, n - done);
+          const chs = Array.from({ length: doc.ch }, () => new Float32Array(k));
+          writer.push(addTones(chs, list, { rate: doc.rate, at: done, span: n, fade }));
+          await writer.drain();
+          done += k;
+          progress(done / n);
+        }
+        const segs = await writer.finish();
+        selA = at; selB = at + n;
+        setSegs(pcm.replace(doc.segs, at, at, segs));
+        ok = true;
+      } catch (err) {
+        deps.toast('Adding frequencies failed: ' + err.message, 8000);
+      }
+    });
+    if (ok) deps.toast(`Inserted ${fmt(secs)} of ${label} at ${fmt(at / doc.rate)}.`);
+    return;
+  }
+  const [a, b] = range();
+  const duck = +$('ed-tones-original').value; // dB for the original sound; -99 = remove it
+  const g = duck <= -99 ? 0 : Math.pow(10, duck / 20);
+  const ok = await rewrite(`Adding ${label}…`, a, b, async (pos, n) => {
+    const chs = await pcm.readRange(doc, pos, n);
+    if (g !== 1) for (const x of chs) for (let i = 0; i < x.length; i++) x[i] *= g;
+    return addTones(chs, list, { rate: doc.rate, at: pos - a, span: b - a, fade });
+  });
+  if (ok) deps.toast(`Added ${label} to ${hasSel() ? 'the selection' : 'the whole recording'}.`);
+}
+
+// Plays the tones alone for 6 seconds (or stops a preview).
+async function previewTones() {
+  if (previewNodes) { stopPreview(); return; }
+  const list = layers().filter((l) => l.left > 0);
+  if (!list.length) return;
+  const { ctx } = await deps.audioGraph();
+  const out = ctx.createGain();
+  const merger = ctx.createChannelMerger(2);
+  merger.connect(out).connect(ctx.destination);
+  const now = ctx.currentTime, secs = 6;
+  out.gain.setValueAtTime(0, now);
+  out.gain.linearRampToValueAtTime(1, now + 0.3);
+  out.gain.setValueAtTime(1, now + secs - 0.3);
+  out.gain.linearRampToValueAtTime(0, now + secs);
+  const oscs = [];
+  for (const l of list) {
+    for (const [ch, f] of [[0, l.left], [1, l.right > 0 ? l.right : l.left]]) {
+      const o = ctx.createOscillator();
+      o.type = l.wave;
+      o.frequency.value = f;
+      const gn = ctx.createGain();
+      gn.gain.value = Math.pow(10, l.db / 20);
+      o.connect(gn).connect(merger, 0, ch);
+      o.start(now);
+      o.stop(now + secs);
+      oscs.push(o);
+    }
+  }
+  previewNodes = { oscs, out };
+  $('ed-tones-preview').textContent = '■ Stop preview';
+  oscs[0].onended = () => { if (previewNodes && previewNodes.oscs === oscs) stopPreview(); };
+}
+
+function stopPreview() {
+  if (!previewNodes) return;
+  previewNodes.oscs.forEach((o) => { try { o.stop(); } catch {} });
+  previewNodes.out.disconnect();
+  previewNodes = null;
+  $('ed-tones-preview').textContent = '▶ Preview (6 s)';
+}
+
+// Takes one frequency (and optionally its harmonics) out with narrow notches.
+async function removeFrequency() {
+  const f = +$('ed-notch-hz').value;
+  if (!(f > 0) || f >= doc.rate / 2) return deps.toast('Type the frequency to remove, in Hz.');
+  const harmonics = $('ed-notch-harm').checked ? 4 : 1;
+  const [a, b] = range();
+  const ok = await filterRange(`Removing ${hz(f)}…`, a, b, (oc) => {
+    const fs = [];
+    for (let k = 1; k <= harmonics && f * k < doc.rate / 2; k++) {
+      for (let pass = 0; pass < 2; pass++) { // two notches deep, so it's really gone
+        const n = oc.createBiquadFilter();
+        n.type = 'notch'; n.frequency.value = f * k; n.Q.value = Math.max(5, (f * k) / 4);
+        fs.push(n);
+      }
+    }
+    return fs;
+  });
+  if (ok) deps.toast(`Removed ${hz(f)}${harmonics > 1 ? ' and its harmonics' : ''} from ${hasSel() ? 'the selection' : 'the whole recording'}.`);
+}
+
+// A new, silent audio to build a frequency track on.
+async function newToneAudio() {
+  const secs = parseTime($('ed-new-length').value);
+  if (!(secs > 0) || secs > 48 * 3600) return deps.toast('Type a length like 10:00 or 1:00:00 (up to 48 hours).');
+  if (!(await makeRoom())) return;
+  const d = pcm.newDoc('frequencies', 48000, 2);
+  d.segs = [pcm.silence(Math.round(secs * 48000))]; // silence takes no space
+  await pcm.saveDoc(d);
+  show(d);
+  $('ed-tones-where').value = 'mix';
+  $('ed-tones-original').value = '0';
+  updateTonesUi();
+  $('ed-tones').open = true;
+  deps.toast(`New ${fmt(secs)} audio. Add frequencies below, then press "Add to audio".`, 6000);
+  $('ed-tones').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // Exposed for automated tests.
