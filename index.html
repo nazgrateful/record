@@ -205,6 +205,11 @@
         <label class="button primary-ish"><input type="file" id="ed-file" accept="audio/*,video/*,.wav,.mp3,.m4a,.ogg,.opus,.webm,.mkv,.mp4,.flac" hidden> Import audio file…</label>
         <span class="muted">or drop an audio or video file here (WAV, MP3, M4A, OGG/Opus, WebM, MP4…), up to 12 hours or more. You can also press <b>Edit</b> on a saved recording.</span>
         <div class="row options">
+          <span class="muted">or start from silence:</span>
+          <input type="text" id="ed-new-length" value="10:00" class="ed-goto" aria-label="Length of the new audio">
+          <button id="ed-new-tones">New audio from frequencies</button>
+        </div>
+        <div class="row options">
           <label><input type="checkbox" id="ed-mono"> Import as mono (half the space; good for very long files)</label>
           <label><input type="checkbox" id="ed-keep-original"> Also add the original file to Saved recordings</label>
         </div>
@@ -272,6 +277,45 @@
           <span id="ed-noise-status" class="muted"></span>
           <span class="muted">(uses the strength settings in "Background noise removal")</span>
         </div>
+        <details id="ed-tones" class="tones">
+          <summary><span class="label">Frequencies</span> Add frequencies (tones, binaural beats) or remove one</summary>
+          <div class="row">
+            <select id="ed-tones-add" aria-label="Add a frequency"></select>
+            <button id="ed-tones-preview" class="small">▶ Preview (6 s)</button>
+          </div>
+          <div class="tones-table">
+            <table>
+              <thead><tr><th>Name</th><th>Hz (left / both ears)</th><th title="Optional: a different frequency in the right ear makes a binaural beat (use headphones)">Right ear Hz</th><th>Wave</th><th>Volume dB</th><th></th></tr></thead>
+              <tbody id="ed-tones-body"></tbody>
+            </table>
+          </div>
+          <div class="row options">
+            <label>Where
+              <select id="ed-tones-where">
+                <option value="mix">Mix into the selection (or the whole audio)</option>
+                <option value="insert">Insert at the cursor as new audio</option>
+              </select>
+            </label>
+            <label id="ed-tones-length-wrap" hidden>Length <input type="text" id="ed-tones-length" value="1:00" class="ed-goto"></label>
+            <label id="ed-tones-original-wrap">Original sound
+              <select id="ed-tones-original">
+                <option value="0">keep as is</option>
+                <option value="-6">6 dB quieter</option>
+                <option value="-12">12 dB quieter</option>
+                <option value="-99">replace it with the tones</option>
+              </select>
+            </label>
+            <label>Fade in/out <input type="number" id="ed-tones-fade" value="2" min="0" max="600" step="0.5" class="num"> s</label>
+            <button id="ed-tones-apply" class="primary">Add to audio</button>
+          </div>
+          <div class="row options">
+            <span class="label">Remove</span>
+            <input type="number" id="ed-notch-hz" placeholder="Hz" min="1" step="any" class="num" aria-label="Frequency to remove (Hz)">
+            <label><input type="checkbox" id="ed-notch-harm"> and its harmonics</label>
+            <button id="ed-notch-btn" class="small">Remove this frequency</button>
+          </div>
+          <p class="hint">Volume is per frequency (−18 dB sits gently under speech; 0 dB is the maximum). Right ear Hz makes a binaural beat: listen with headphones. Built-in "uses" of spiritual and binaural frequencies are popular claims, not proven effects.</p>
+        </details>
         <div class="row">
           <span class="label">Health</span>
           <button id="ed-health" class="small">✚ Check audio health</button>
