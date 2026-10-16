@@ -6,6 +6,13 @@ specific frequencies** when they show up in the audio.
 
 ## Features
 
+- **Record my screen** in one click: the share window opens with the whole
+  screen offered first, and recording starts as soon as you pick. Choose
+  computer sound and/or your microphone, quality (720p, 1080p, 1440p, 4K or
+  the screen's own size) and smoothness (30 or 60 fps); the mouse pointer is
+  shown. Stop with ■ Stop or the browser's "Stop sharing"; it's saved in
+  Saved recordings (MP4 where the browser can). Works on computers (Chrome,
+  Edge, Firefox, Safari); phones and tablets can't share their screen.
 - **Screen + internal audio recording** with the browser's screen-share picker.
 - **Microphone recording**, with or without a screen share (or audio only).
 - **Background noise removal** (runs in the app, on the audio thread):

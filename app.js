@@ -23,6 +23,10 @@ const defaults = {
   toneLayers: [],          // editor "Add frequencies" layers
   mode: 'combined',        // combined | separate | audio | video
   fileType: 'mp4',         // new recordings: 'mp4' when the browser can, else 'webm'
+  screenQuality: '1080',   // Record my screen: 720 | 1080 | 1440 | 2160 | max
+  screenFps: 30,
+  screenSound: true,       // computer sound
+  screenMic: false,        // also the microphone
   autoDownload: true,
   saveFolder: false,
 };
@@ -158,17 +162,58 @@ function applyMonitor() {
   if (nodes) nodes.monitor.gain.value = $('opt-monitor').checked ? 1 : 0;
 }
 
+// ------------------------------------------------------ record my screen --
+
+// One click: pick the screen, then recording starts straight away.
+async function recordScreen() {
+  if (recorder) return toast('Already recording: press ■ Stop first.');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    return toast('This browser can\'t record the screen. Use Chrome, Edge, Firefox or Safari on a computer (phones and tablets can\'t share their screen with websites).', 9000);
+  }
+  // Ask for the save folder first, while the click still counts.
+  const folder = await folderForRecording();
+  if (settings.screenMic && !mic) await startMic();
+  if (!settings.screenMic && mic) stopMic();
+  await startScreen({ audio: settings.screenSound });
+  if (!display) return; // cancelled
+  if ($('opt-mode').value === 'audio') { $('opt-mode').value = 'combined'; settings.mode = 'combined'; saveSettings(); }
+  await startRecording({ folder });
+  if (recorder) {
+    const s = display.stream.getVideoTracks()[0].getSettings();
+    toast(`Recording your screen${s.width ? ` (${s.width}×${s.height}, ${Math.round(s.frameRate || settings.screenFps)} fps)` : ''}. Press ■ Stop or "Stop sharing" to finish.`, 6000);
+    $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
 // --------------------------------------------------------------- sources --
 
-async function startScreen() {
+const SCREEN_SIZES = { 720: [1280, 720], 1080: [1920, 1080], 1440: [2560, 1440], 2160: [3840, 2160] };
+
+// What to ask the browser for: the whole screen offered first, the mouse
+// pointer shown, at the chosen size and smoothness.
+function displayOptions(wantAudio = true) {
+  const size = SCREEN_SIZES[settings.screenQuality];
+  const fps = +settings.screenFps || 30;
+  return {
+    video: {
+      frameRate: { ideal: fps, max: fps },
+      ...(size ? { width: { ideal: size[0], max: size[0] }, height: { ideal: size[1], max: size[1] } } : {}),
+      cursor: 'always',
+      displaySurface: 'monitor',
+    },
+    audio: wantAudio ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false } : false,
+    systemAudio: wantAudio ? 'include' : 'exclude',
+    surfaceSwitching: 'include',
+    selfBrowserSurface: 'exclude',
+    monitorTypeSurfaces: 'include',
+  };
+}
+
+async function startScreen(opts = {}) {
   try {
     await ensureAudio();
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 30 },
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false },
-      systemAudio: 'include',
-      surfaceSwitching: 'include',
-    });
+    const wantAudio = opts.audio ?? true;
+    const stream = await navigator.mediaDevices.getDisplayMedia(displayOptions(wantAudio));
     stopScreen();
     const video = document.createElement('video');
     video.muted = true;
@@ -183,12 +228,19 @@ async function startScreen() {
     if (stream.getAudioTracks().length) {
       source = ctx.createMediaStreamSource(stream);
       source.connect(nodes.intIn);
-    } else {
-      toast('No audio was shared. Share again and turn on "Share audio" to capture internal sound.', 7000);
+    } else if (wantAudio) {
+      toast('No computer sound was shared. To include it, share again and turn on "Share audio" (whole screen on Windows/ChromeOS; on Mac/Linux share a browser tab for its sound).', 8000);
     }
     display = { stream, source, video };
+    // Draw every new screen frame (smooth 60 fps when chosen), not only on
+    // the 30-per-second audio tick.
+    if (video.requestVideoFrameCallback) {
+      const onFrame = () => { if (display && display.video === video) { drawPreview(); video.requestVideoFrameCallback(onFrame); } };
+      video.requestVideoFrameCallback(onFrame);
+    }
     stream.getVideoTracks()[0].addEventListener('ended', () => {
-      if (recorder && recorder.usesDisplayTrack) stopRecording();
+      // "Stop sharing" in the browser ends a screen recording too.
+      if (recorder && recorder.screen) stopRecording();
       stopScreen();
     });
   } catch (err) {
@@ -410,11 +462,11 @@ function readSpectrum() {
     // Parabolic interpolation for a sub-bin estimate.
     const a = freqData[best - 1], b = freqData[best], c = freqData[best + 1];
     const shift = (a - c) / (2 * (a - 2 * b + c)) || 0;
-    peak = (best + shift) * binHz;
+    peak = (best + (Number.isFinite(shift) ? Math.max(-0.5, Math.min(0.5, shift)) : 0)) * binHz;
   } else peak = null;
 
-  if (peak) {
-    const note = freqToNote(peak);
+  const note = peak > 0 ? freqToNote(peak) : null;
+  if (note) {
     $('now-peak').textContent = `${fmtHz(peak)} · ${note.name}${note.cents ? ` ${note.cents > 0 ? '+' : ''}${note.cents}¢` : ''}`;
   } else $('now-peak').textContent = '—';
   $('now-level').textContent = Number.isFinite(lastStatus.db) ? `${lastStatus.db.toFixed(0)} dB` : '—';
@@ -424,7 +476,7 @@ function drawPreview() {
   const v = display && display.video;
   const hasVideo = v && v.videoWidth > 0 && $('opt-mode').value !== 'audio';
   if (hasVideo) {
-    const w = Math.min(1920, v.videoWidth);
+    const w = Math.min(3840, v.videoWidth); // keep the screen's full sharpness
     const h = Math.round((v.videoHeight / v.videoWidth) * w);
     if (preview.width !== w || preview.height !== h) {
       if (!recorder) { preview.width = w; preview.height = h; }
@@ -613,12 +665,12 @@ async function folderForRecording() {
 
 // --------------------------------------------------------------- record --
 
-async function startRecording() {
+async function startRecording(opts = {}) {
   if (!nodes || recorder) return;
   const mode = $('opt-mode').value;
   const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
   const baseName = `recording-${stamp}`;
-  const folder = await folderForRecording();
+  const folder = 'folder' in opts ? opts.folder : await folderForRecording();
   store.requestPersistence().then(renderStorageInfo).catch(() => {});
 
   const kinds = PART_KINDS[mode] || PART_KINDS.combined;
@@ -629,16 +681,19 @@ async function startRecording() {
       videoTrack = display.stream.getVideoTracks()[0];
       usesDisplayTrack = true;
     } else {
-      videoTrack = canvasTrack = preview.captureStream(30).getVideoTracks()[0];
+      videoTrack = canvasTrack = preview.captureStream(display ? +settings.screenFps || 30 : 30).getVideoTracks()[0];
     }
   }
 
-  const r = { startedAt: 0, usesDisplayTrack, canvasTrack, baseName, folder, parts: [] };
+  const r = { startedAt: 0, usesDisplayTrack, canvasTrack, baseName, folder, parts: [], screen: !!display && kinds.some((k) => k.video) };
   try {
     for (const k of kinds) {
       const mimeType = pickMime(k.audio, k.video);
       const tracks = [...(k.audio ? [audioTrack] : []), ...(k.video ? [videoTrack] : [])];
-      const mr = new MediaRecorder(new MediaStream(tracks), mimeType ? { mimeType } : undefined);
+      // Enough bits for sharp text in screen recordings (scales with size and fps).
+      const vs = k.video && videoTrack.getSettings ? videoTrack.getSettings() : {};
+      const vbps = k.video ? Math.round(Math.min(40e6, Math.max(2.5e6, (vs.width || preview.width) * (vs.height || preview.height) * (vs.frameRate || 30) * 0.12))) : 0;
+      const mr = new MediaRecorder(new MediaStream(tracks), { ...(mimeType ? { mimeType } : {}), ...(k.video ? { videoBitsPerSecond: vbps } : {}), ...(k.audio ? { audioBitsPerSecond: 160000 } : {}) });
       const mime = mr.mimeType || mimeType || (k.video ? 'video/webm' : 'audio/webm');
       const ext = extFor(mime, !k.video);
       const name = kinds.length > 1 ? `${baseName}-${k.kind}` : baseName;
@@ -1555,7 +1610,19 @@ function init() {
     toast('Open this page through a web server (see README); browsers block audio processing on file:// pages.', 10000);
   }
 
-  $('btn-capture').addEventListener('click', startScreen);
+  $('btn-capture').addEventListener('click', () => startScreen());
+  $('btn-screen-rec').addEventListener('click', recordScreen);
+  for (const [id, key, conv] of [['opt-sc-quality', 'screenQuality', String], ['opt-sc-fps', 'screenFps', Number]]) {
+    $(id).value = String(settings[key]);
+    $(id).addEventListener('change', () => { settings[key] = conv($(id).value); saveSettings(); });
+  }
+  for (const [id, key] of [['opt-sc-sound', 'screenSound'], ['opt-sc-mic', 'screenMic']]) {
+    $(id).checked = !!settings[key];
+    $(id).addEventListener('change', () => { settings[key] = $(id).checked; saveSettings(); });
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    $('screen-hint').textContent = 'Screen recording needs Chrome, Edge, Firefox or Safari on a computer. Phones and tablets can\'t share their screen with websites; you can still record sound here.';
+  }
   $('btn-mic').addEventListener('click', () => (mic ? stopMic() : startMic()));
   $('btn-test').addEventListener('click', () => (tones ? stopTones() : startTones()));
   $('btn-release').addEventListener('click', stopAll);

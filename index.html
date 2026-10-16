@@ -16,8 +16,31 @@
   <main>
     <section class="card" id="capture-card">
       <h2>1. Capture</h2>
+      <div class="screen-rec">
+        <button id="btn-screen-rec" class="primary big">🖥 Record my screen</button>
+        <div class="row options">
+          <label><input type="checkbox" id="opt-sc-sound" checked> Computer sound</label>
+          <label><input type="checkbox" id="opt-sc-mic"> My microphone</label>
+          <label>Quality
+            <select id="opt-sc-quality">
+              <option value="720">720p (smaller files)</option>
+              <option value="1080" selected>1080p Full HD</option>
+              <option value="1440">1440p</option>
+              <option value="2160">4K</option>
+              <option value="max">Original screen size</option>
+            </select>
+          </label>
+          <label>Smoothness
+            <select id="opt-sc-fps">
+              <option value="30" selected>30 fps</option>
+              <option value="60">60 fps (smoother, bigger files)</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint" id="screen-hint">In the window that opens, choose <b>Entire screen</b> (or one window or tab) and turn on <b>Share audio</b> for the computer's sound, then press Share: recording starts straight away. Press <b>■ Stop</b> or the browser's <b>Stop sharing</b> to finish; it's saved below in Saved recordings.</p>
+      </div>
       <div class="row">
-        <button id="btn-capture" class="primary">Share screen + internal audio</button>
+        <button id="btn-capture">Share screen only (record later)</button>
         <button id="btn-mic">Add microphone (external audio)</button>
         <button id="btn-test">Play test tones</button>
         <button id="btn-release" disabled>Stop all</button>
