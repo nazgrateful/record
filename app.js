@@ -178,19 +178,101 @@ function recordScreen() {
   (async () => {
     await startScreen({ stream, audio: settings.screenSound });
     if (!display) return; // cancelled or blocked (explained under the button)
-    if (settings.screenMic && !mic) await startMic();
-    if (!settings.screenMic && mic) stopMic();
-    if ($('opt-mode').value === 'audio') { $('opt-mode').value = 'combined'; settings.mode = 'combined'; saveSettings(); }
-    // The auto-save folder: only if the browser still allows it without asking
-    // (asking would need another click); otherwise it's saved on the site.
-    const folder = await folderIfAllowed();
-    await startRecording({ folder });
-    if (recorder) {
-      const s = display.stream.getVideoTracks()[0].getSettings();
-      toast(`Recording your screen${s.width ? ` (${s.width}×${s.height}, ${Math.round(s.frameRate || settings.screenFps)} fps)` : ''}. Press ■ Stop or "Stop sharing" to finish.`, 6000);
-      $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Computer sound wanted but the share came without it: use a loopback
+    // device if there is one, otherwise ask before recording without it.
+    if (settings.screenSound && !display.source) {
+      const dev = await findLoopbackDevice();
+      if (dev && (await startLoopback(dev))) {
+        toast(`Recording the computer's sound from "${dev.label}".`, 6000);
+      } else {
+        noComputerSound();
+        return;
+      }
     }
+    await beginScreenRecording();
   })().catch((err) => screenProblem(err));
+}
+
+async function beginScreenRecording() {
+  if (!display || recorder) return;
+  screenProblem(null);
+  const micForScreen = settings.screenMic && !mic;
+  if (micForScreen) await startMic();
+  if (!settings.screenMic && mic) stopMic();
+  if ($('opt-mode').value === 'audio') { $('opt-mode').value = 'combined'; settings.mode = 'combined'; saveSettings(); }
+  // The auto-save folder: only if the browser still allows it without asking
+  // (asking would need another click); otherwise it's saved on the site.
+  const folder = await folderIfAllowed();
+  await startRecording({ folder });
+  if (recorder) {
+    recorder.micForScreen = micForScreen;
+    const s = display.stream.getVideoTracks()[0].getSettings();
+    const sound = display.source ? ' with computer sound' : display.loopback ? ` with computer sound (${display.loopback.label})` : '';
+    toast(`Recording your screen${sound}${s.width ? ` (${s.width}×${s.height}, ${Math.round(s.frameRate || settings.screenFps)} fps)` : ''}. Press ■ Stop or "Stop sharing" to finish.`, 6000);
+    $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+// ------------------------------------------------- computer (internal) sound --
+
+const platform = () => {
+  const ua = navigator.userAgent;
+  return /Mac/.test(navigator.platform || ua) ? 'mac' : /Win/.test(navigator.platform || ua) ? 'win' : /CrOS/.test(ua) ? 'cros' : /Linux/.test(ua) ? 'linux' : 'other';
+};
+const chromium = () => !!(navigator.userAgentData && navigator.userAgentData.brands && navigator.userAgentData.brands.some((b) => /Chrom|Edge/.test(b.brand)));
+
+// Devices that carry the computer's own sound (Windows "Stereo Mix", Mac
+// BlackHole/Loopback/Soundflower, VB-Cable, Linux "Monitor of …").
+const LOOPBACK = /stereo mix|what u hear|wave out|blackhole|loopback|soundflower|vb-?audio|cable output|voicemeeter|monitor of|ishowu|background music/i;
+
+async function findLoopbackDevice() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+  let devices = await navigator.mediaDevices.enumerateDevices();
+  const named = () => devices.filter((d) => d.kind === 'audioinput' && LOOPBACK.test(d.label));
+  if (!named().length && devices.some((d) => d.kind === 'audioinput' && !d.label)) {
+    // Device names are hidden until the site may use the microphone.
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s.getTracks().forEach((t) => t.stop());
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch { return null; }
+  }
+  return named()[0] || null;
+}
+
+async function startLoopback(dev) {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: dev.deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 },
+    });
+    const source = ctx.createMediaStreamSource(stream);
+    source.connect(nodes.intIn);
+    display.loopback = { stream, source, label: dev.label };
+    updateSources();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// No computer sound came with the share: explain how to get it on this
+// system, and let the person choose.
+function noComputerSound() {
+  const p = platform();
+  const tips = {
+    win: 'In the share window, choose <b>Entire screen</b> and turn on <b>Also share system audio</b> (bottom left), or pick a <b>tab</b> with <b>Also share tab audio</b> on.',
+    cros: 'In the share window, choose <b>Entire screen</b> and turn on <b>Also share system audio</b>, or pick a <b>tab</b> with <b>Also share tab audio</b> on.',
+    mac: 'On a Mac, browsers can share the sound of a <b>Chrome tab</b> (choose the tab and keep <b>Also share tab audio</b> on); newer Chrome on macOS 14.2+ also offers <b>Also share system audio</b> for the entire screen. For the whole computer\'s sound with any setup, install the free <b>BlackHole</b> audio driver and send your sound to it — this site then picks it up automatically.',
+    linux: 'On Linux, browsers can share the sound of a <b>tab</b> (keep <b>Also share tab audio</b> on). For the whole computer\'s sound, a "Monitor of …" input (PulseAudio/PipeWire) is picked up automatically when it exists.',
+    other: 'Choose a screen or tab and turn on the <b>share audio</b> switch in the share window.',
+  }[p];
+  const browserNote = chromium() ? '' : ' <b>This browser can\'t share computer sound at all</b> — use Chrome or Edge for that.';
+  const el = $('screen-error');
+  el.innerHTML = `⚠ <b>No computer sound was shared</b>, so it wouldn't be in the recording. ${tips}${browserNote}
+    <span class="row"><button class="small primary" data-again>Share again with sound</button><button class="small" data-anyway>Record without computer sound</button></span>`;
+  el.hidden = false;
+  el.querySelector('[data-again]').onclick = () => { stopScreen(); recordScreen(); };
+  el.querySelector('[data-anyway]').onclick = () => { beginScreenRecording().catch(screenProblem); };
 }
 
 // Opens the browser's screen picker (must be called straight from a click).
@@ -266,6 +348,7 @@ function displayOptions(wantAudio = true) {
     },
     audio: wantAudio ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false } : false,
     systemAudio: wantAudio ? 'include' : 'exclude',
+    windowAudio: wantAudio ? 'system' : 'exclude', // Chrome: also offer a window's sound
     surfaceSwitching: 'include',
     selfBrowserSurface: 'exclude',
     monitorTypeSurfaces: 'include',
@@ -294,7 +377,7 @@ async function startScreen(opts = {}) {
     if (stream.getAudioTracks().length) {
       source = ctx.createMediaStreamSource(stream);
       source.connect(nodes.intIn);
-    } else if (wantAudio) {
+    } else if (wantAudio && !opts.stream) {
       toast('No computer sound was shared. To include it, share again and turn on "Share audio" (whole screen on Windows/ChromeOS; on Mac/Linux share a browser tab for its sound).', 8000);
     }
     display = { stream, source, video };
@@ -319,6 +402,7 @@ function stopScreen() {
   if (!display) return;
   display.stream.getTracks().forEach((t) => t.stop());
   display.source && display.source.disconnect();
+  if (display.loopback) { display.loopback.stream.getTracks().forEach((t) => t.stop()); display.loopback.source.disconnect(); }
   display.video.remove();
   display = null;
   updateSources();
@@ -415,7 +499,7 @@ function stopAll() {
 
 function updateSources() {
   const parts = [];
-  if (display) parts.push(display.source ? 'Screen + internal audio' : 'Screen (no audio)');
+  if (display) parts.push(display.source ? 'Screen + internal audio' : display.loopback ? `Screen + internal audio (${display.loopback.label})` : 'Screen (no computer sound)');
   if (mic) parts.push('Microphone');
   if (tones) parts.push('Test tones');
   $('sources').textContent = parts.length ? 'Live: ' + parts.join(' · ') : 'No sources yet.';
@@ -901,6 +985,15 @@ async function finishRecording(r) {
   r.canvasTrack && r.canvasTrack.stop();
   recorder = null;
   releaseWake();
+  // Stopping a screen recording also stops sharing the screen: the site no
+  // longer sees it (the browser's "sharing" indicator goes away), and the
+  // preview is cleared. A microphone turned on just for it goes off too.
+  if (r.screen) {
+    stopScreen();
+    if (r.micForScreen) stopMic();
+    pctx.fillStyle = '#0d0f13';
+    pctx.fillRect(0, 0, preview.width, preview.height);
+  }
   $('rec-badge').hidden = true;
   $('btn-stop').disabled = true;
   for (const id of RECORD_LOCKED) $(id).disabled = /folder/.test(id) && !window.showDirectoryPicker;

@@ -13,6 +13,11 @@ specific frequencies** when they show up in the audio.
   shown. Stop with ■ Stop or the browser's "Stop sharing"; it's saved in
   Saved recordings (MP4 where the browser can). Works on computers (Chrome,
   Edge, Firefox, Safari); phones and tablets can't share their screen.
+  Computer (internal) sound is recorded automatically: the share window's
+  audio switch is requested on; if no sound comes through, a loopback device
+  (Stereo Mix, BlackHole, Loopback, VB-Cable, "Monitor of …") is used when
+  present; otherwise it asks before recording without sound, with tips for
+  the system. Stopping ends the screen share at once.
 - **Screen + internal audio recording** with the browser's screen-share picker.
 - **Microphone recording**, with or without a screen share (or audio only).
 - **Background noise removal** (runs in the app, on the audio thread):
