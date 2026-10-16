@@ -2,6 +2,7 @@ import { PRESET_LIBRARY, NOTE_NAMES, noteToFreq, freqToNote, beatBand } from './
 import * as store from './db.js';
 import { initEditor, openFile as openInEditor, openForTones, fillFormats, renderHealthList } from './editor.js';
 import { Stats, liveSuggestions } from './health.js';
+import { playTone } from './tone-player.js';
 import { encode, fileSource, formatById, downloadParts } from './export.js';
 import { convertVideo, recorderMp4, VIDEO_FORMATS } from './video.js';
 
@@ -165,24 +166,86 @@ function applyMonitor() {
 // ------------------------------------------------------ record my screen --
 
 // One click: pick the screen, then recording starts straight away.
-async function recordScreen() {
+//
+// Browsers only open the screen picker if it's asked for right away in the
+// click (Safari: immediately; Chrome/Firefox: within a few seconds), so the
+// picker is requested first and everything else happens after.
+function recordScreen() {
+  screenProblem(null);
   if (recorder) return toast('Already recording: press ■ Stop first.');
+  const stream = requestScreen(settings.screenSound);
+  if (!stream) return;
+  (async () => {
+    await startScreen({ stream, audio: settings.screenSound });
+    if (!display) return; // cancelled or blocked (explained under the button)
+    if (settings.screenMic && !mic) await startMic();
+    if (!settings.screenMic && mic) stopMic();
+    if ($('opt-mode').value === 'audio') { $('opt-mode').value = 'combined'; settings.mode = 'combined'; saveSettings(); }
+    // The auto-save folder: only if the browser still allows it without asking
+    // (asking would need another click); otherwise it's saved on the site.
+    const folder = await folderIfAllowed();
+    await startRecording({ folder });
+    if (recorder) {
+      const s = display.stream.getVideoTracks()[0].getSettings();
+      toast(`Recording your screen${s.width ? ` (${s.width}×${s.height}, ${Math.round(s.frameRate || settings.screenFps)} fps)` : ''}. Press ■ Stop or "Stop sharing" to finish.`, 6000);
+      $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  })().catch((err) => screenProblem(err));
+}
+
+// Opens the browser's screen picker (must be called straight from a click).
+// Returns the pending stream, or null with the reason shown.
+function requestScreen(wantAudio) {
+  if (!window.isSecureContext) {
+    screenProblem({ name: 'Insecure' });
+    return null;
+  }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    return toast('This browser can\'t record the screen. Use Chrome, Edge, Firefox or Safari on a computer (phones and tablets can\'t share their screen with websites).', 9000);
+    screenProblem({ name: 'Unsupported' });
+    return null;
   }
-  // Ask for the save folder first, while the click still counts.
-  const folder = await folderForRecording();
-  if (settings.screenMic && !mic) await startMic();
-  if (!settings.screenMic && mic) stopMic();
-  await startScreen({ audio: settings.screenSound });
-  if (!display) return; // cancelled
-  if ($('opt-mode').value === 'audio') { $('opt-mode').value = 'combined'; settings.mode = 'combined'; saveSettings(); }
-  await startRecording({ folder });
-  if (recorder) {
-    const s = display.stream.getVideoTracks()[0].getSettings();
-    toast(`Recording your screen${s.width ? ` (${s.width}×${s.height}, ${Math.round(s.frameRate || settings.screenFps)} fps)` : ''}. Press ■ Stop or "Stop sharing" to finish.`, 6000);
-    $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  try {
+    return navigator.mediaDevices.getDisplayMedia(displayOptions(wantAudio));
+  } catch (err) {
+    screenProblem(err);
+    return null;
   }
+}
+
+// Explains, under the Record my screen button, why recording couldn't start.
+function screenProblem(err) {
+  const el = $('screen-error');
+  if (!err) { el.hidden = true; return; }
+  const msg = String(err.message || '');
+  const mac = /Mac/.test(navigator.platform || navigator.userAgent);
+  let text;
+  if (err.name === 'Insecure') text = 'Screen recording only works when the site is opened over https:// (or http://localhost). Open the published https:// address instead of the file.';
+  else if (err.name === 'Unsupported') text = "This browser can't record the screen. Use Chrome, Edge, Firefox or Safari on a computer — phones and tablets don't let websites record their screen.";
+  else if (err.name === 'NotAllowedError' && /system/i.test(msg)) {
+    text = mac
+      ? 'Your Mac is blocking screen recording for this browser. Open System Settings → Privacy & Security → Screen & System Audio Recording, turn your browser on, then quit and reopen the browser.'
+      : 'Your computer is blocking screen recording for this browser. Allow it in your system privacy settings, then restart the browser.';
+  } else if (err.name === 'NotAllowedError' && window.top !== window.self) {
+    text = 'Screen recording is blocked because this page is shown inside another page (a preview). Open the site in its own browser tab.';
+  } else if (err.name === 'NotAllowedError' && /gesture|activation/i.test(msg)) {
+    text = 'The browser wants the screen picker to open straight from a click. Press "Record my screen" again.';
+  } else if (err.name === 'NotAllowedError') {
+    text = 'Screen recording was cancelled or not allowed. Press "Record my screen" and choose a screen, window or tab, then Share. If no window appeared, check the address bar for a blocked-permission icon and allow screen sharing.';
+  } else if (err.name === 'NotReadableError' || err.name === 'AbortError') {
+    text = "The screen couldn't be captured (another app may be using it, or the system stopped it). Close other screen-recording apps and try again.";
+  } else if (err.name === 'NotFoundError') {
+    text = 'No screen was found to record.';
+  } else text = `Screen recording couldn't start: ${err.name || ''} ${msg}`.trim();
+  el.textContent = '⚠ ' + text;
+  el.hidden = false;
+}
+
+// The chosen save folder, if writing to it is still allowed without a prompt.
+async function folderIfAllowed() {
+  if (!$('opt-save-folder').checked || !folderHandle) return null;
+  try { if ((await folderHandle.queryPermission({ mode: 'readwrite' })) === 'granted') return folderHandle; } catch {}
+  toast(`Not saving into "${folderHandle.name}" this time (the browser wants permission again: press ● Record once, or Choose folder). It's saved on the website and downloaded as usual.`, 8000);
+  return null;
 }
 
 // --------------------------------------------------------------- sources --
@@ -211,9 +274,12 @@ function displayOptions(wantAudio = true) {
 
 async function startScreen(opts = {}) {
   try {
-    await ensureAudio();
     const wantAudio = opts.audio ?? true;
-    const stream = await navigator.mediaDevices.getDisplayMedia(displayOptions(wantAudio));
+    // The picker must be opened straight from the click, before anything else.
+    const pending = opts.stream || requestScreen(wantAudio);
+    if (!pending) return;
+    const stream = await pending;
+    await ensureAudio();
     stopScreen();
     const video = document.createElement('video');
     video.muted = true;
@@ -244,7 +310,7 @@ async function startScreen(opts = {}) {
       stopScreen();
     });
   } catch (err) {
-    if (err.name !== 'NotAllowedError') toast('Screen capture failed: ' + err.message, 6000);
+    screenProblem(err);
   }
   updateSources();
 }
@@ -1524,7 +1590,8 @@ function renderTargets() {
       <td><input type="number" data-k="freq" min="1" max="24000" step="any"></td>
       <td><input type="number" data-k="tolerance" min="0" max="2000" step="any"></td>
       <td><input type="checkbox" data-k="mute" title="Silence the recording while this frequency is present"></td>
-      <td><button class="small" data-del>✕</button></td>`;
+      <td class="row-btns"><button class="small play" data-play title="Hear it">▶</button><button class="small" data-del>✕</button></td>`;
+    tr.querySelector('[data-play]').addEventListener('click', (e) => playTone({ hz: t.freq }, e.currentTarget));
     const name = tr.querySelector('[data-k=name]');
     const freq = tr.querySelector('[data-k=freq]');
     const tol = tr.querySelector('[data-k=tolerance]');
@@ -1565,9 +1632,10 @@ function renderLibrary() {
     for (const item of items) {
       const row = document.createElement('div');
       row.className = 'lib-item';
-      row.innerHTML = `<span><span class="n"></span> <span class="hz">${fmtHz(item.freq)} ±${item.tolerance}</span></span><button class="small">+ Add</button>`;
+      row.innerHTML = `<span><span class="n"></span> <span class="hz">${fmtHz(item.freq)} ±${item.tolerance}</span></span><span class="row-btns"><button class="small play" data-play title="Hear it">▶</button><button class="small" data-add>+ Add</button></span>`;
       row.querySelector('.n').textContent = item.name;
-      row.querySelector('button').addEventListener('click', () => addTarget({ ...item }));
+      row.querySelector('[data-play]').addEventListener('click', (e) => playTone({ hz: item.freq }, e.currentTarget));
+      row.querySelector('[data-add]').addEventListener('click', () => addTarget({ ...item }));
       div.appendChild(row);
     }
     box.appendChild(div);
@@ -1585,6 +1653,7 @@ function setupNotePicker() {
   ns.addEventListener('change', update);
   oc.addEventListener('change', update);
   update();
+  $('btn-play-note').addEventListener('click', (e) => playTone({ hz: noteToFreq(ns.value, +oc.value) }, e.currentTarget));
   $('btn-add-note').addEventListener('click', () => {
     const f = noteToFreq(ns.value, +oc.value);
     // About a quarter of a semitone either side.
@@ -1638,7 +1707,7 @@ function init() {
     toast('Open this page through a web server (see README); browsers block audio processing on file:// pages.', 10000);
   }
 
-  $('btn-capture').addEventListener('click', () => startScreen());
+  $('btn-capture').addEventListener('click', () => { screenProblem(null); startScreen(); });
   $('btn-screen-rec').addEventListener('click', recordScreen);
   for (const [id, key, conv] of [['opt-sc-quality', 'screenQuality', String], ['opt-sc-fps', 'screenFps', Number]]) {
     $(id).value = String(settings[key]);

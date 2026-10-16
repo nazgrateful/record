@@ -37,6 +37,7 @@
             </select>
           </label>
         </div>
+        <p id="screen-error" class="screen-error" role="alert" hidden></p>
         <p class="hint" id="screen-hint">In the window that opens, choose <b>Entire screen</b> (or one window or tab) and turn on <b>Share audio</b> for the computer's sound, then press Share: recording starts straight away. Press <b>■ Stop</b> or the browser's <b>Stop sharing</b> to finish; it's saved below in Saved recordings.</p>
       </div>
       <div class="row">
@@ -180,6 +181,7 @@
         <select id="note-name"></select>
         <select id="note-octave"></select>
         <span id="note-freq" class="muted"></span>
+        <button id="btn-play-note" class="play" title="Hear it">▶</button>
         <button id="btn-add-note">Add note</button>
       </div>
     </section>
@@ -434,5 +436,17 @@
 
   <div id="toast" hidden></div>
   <script type="module" src="app.js"></script>
+  <script>
+    // If the app's code didn't load (an old copy cached after an update, a
+    // blocked file...), say so instead of leaving buttons that do nothing.
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        if (window.__freqRecorder) return;
+        var n = document.getElementById('notice');
+        n.textContent = 'The page didn\'t finish loading, so its buttons won\'t work. Refresh it with Ctrl+Shift+R (Mac: Cmd+Shift+R). Your recordings are safe.';
+        n.hidden = false;
+      }, 4000);
+    });
+  </script>
 </body>
 </html>

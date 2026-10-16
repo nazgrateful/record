@@ -110,6 +110,9 @@ specific frequencies** when they show up in the audio.
   spiritual frequencies (Solfeggio, angel numbers, 432 Hz, OM and planetary
   tones, 40 Hz), Robert Monroe / Hemi-Sync example binaural pairs,
   plus a **musical note picker** (C0–B8).
+- **▶ Hear any frequency**: every named frequency, built-in frequency, musical
+  note and editor frequency layer has a play button (one at a time, gentle
+  fades; each ear its own tone for binaural layers).
 - Live spectrum and the loudest frequency right now, with its note name.
 - "Play test tones" lets you try everything without sharing anything.
 

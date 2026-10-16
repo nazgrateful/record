@@ -14,6 +14,7 @@ import { analyze, suggestions } from './health.js';
 import { VIDEO_FORMATS, videoFormatLabels } from './video.js';
 import { addTones, describe, normalizeLayer, freqsFor, WAVES, EARS, BINAURAL_PRESETS } from './tones.js';
 import { PRESET_LIBRARY } from './presets.js';
+import { playTone } from './tone-player.js';
 import { Wsola, Resampler } from './stretch.js';
 import { findStreetNoise, tonalPeaks, TYPES as STREET_TYPES } from './street.js';
 
@@ -1075,7 +1076,7 @@ function drawLayers() {
         </td>
         <td><select data-k="wave" aria-label="Wave"></select></td>
         <td><input type="number" data-k="db" min="-60" max="0" step="1" class="num" aria-label="Volume dB"></td>
-        <td><button class="small" data-del title="Remove">✕</button></td>`;
+        <td class="row-btns"><button class="small play" data-play title="Hear it (each ear its own frequency — use headphones)">▶</button><button class="small" data-del title="Remove">✕</button></td>`;
       const $k = (k) => tr.querySelector(`[data-k=${k}]`);
       $k('ears').append(...Object.entries(EARS).map(([v, label]) => new Option(label, v)));
       $k('wave').append(...Object.entries(WAVES).map(([v, label]) => new Option(label, v)));
@@ -1099,6 +1100,10 @@ function drawLayers() {
       $k('right').addEventListener('change', () => { l.right = num('right', 1, 24000, 432); saveLayers(); });
       $k('wave').addEventListener('change', () => { l.wave = $k('wave').value; deps.saveSettings(); });
       $k('db').addEventListener('change', () => { l.db = num('db', -60, 0, -18); saveLayers(); });
+      tr.querySelector('[data-play]').addEventListener('click', (e) => {
+        const [L] = freqsFor(l, 0, true), [R] = freqsFor(l, 1, true);
+        playTone({ left: L || 0, right: R || 0 }, e.currentTarget, { wave: l.wave, db: Math.max(-40, Math.min(-10, l.db)) });
+      });
       tr.querySelector('[data-del]').addEventListener('click', () => {
         deps.settings.toneLayers = list.filter((x) => x !== l);
         saveLayers();
