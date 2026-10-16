@@ -26,7 +26,6 @@
       </div>
       <div class="row options">
         <label><input type="checkbox" id="opt-monitor"> Hear processed audio (use headphones)</label>
-        <label><input type="checkbox" id="opt-audio-only"> Record audio only</label>
       </div>
       <p class="hint" id="capture-hint">In the share dialog, pick a tab, window or screen and turn on <b>Share audio</b> (system audio works for whole screens on Windows/ChromeOS; on macOS and Linux, share a browser tab to get its audio). You can also record just the microphone without sharing a screen.</p>
     </section>
@@ -83,8 +82,24 @@
         <button id="btn-record" class="primary" disabled>● Record</button>
         <button id="btn-stop" disabled>■ Stop</button>
         <label><input type="checkbox" id="opt-burn" checked> Show names on the video</label>
-        <label id="save-disk-label"><input type="checkbox" id="opt-save-disk"> Also save to a file on my computer</label>
       </div>
+      <div class="row options">
+        <label>Record
+          <select id="opt-mode">
+            <option value="combined">Screen with sound (one file)</option>
+            <option value="separate">Screen and sound as separate files</option>
+            <option value="audio">Sound only</option>
+            <option value="video">Screen only (no sound)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row options">
+        <label><input type="checkbox" id="opt-auto-download" checked> Download automatically when I stop</label>
+        <label id="save-folder-label"><input type="checkbox" id="opt-save-folder"> Also save automatically to a folder on my computer</label>
+        <button id="btn-pick-folder" class="small">Choose folder (e.g. Desktop)</button>
+        <span id="folder-name" class="muted"></span>
+      </div>
+      <p class="hint" id="save-hint">Every recording is also saved on this website. "Separate files" saves the screen video (no sound) and the sound as two files that start at the same moment.</p>
     </section>
 
     <section class="card" id="targets-card">
@@ -148,7 +163,7 @@
 
     <section class="card">
       <h2>5. Saved recordings</h2>
-      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. Download them to keep copies on your computer. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
+      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. They're also downloaded automatically when you stop (if that's turned on), and can be written straight into a folder you choose, such as your Desktop. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
       <p class="hint" id="storage-info"></p>
       <div id="recordings"><p class="muted">Nothing recorded yet.</p></div>
     </section>

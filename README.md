@@ -25,9 +25,17 @@ specific frequencies** when they show up in the audio.
     automatically, written every second while recording. If the tab crashes
     or closes, it's recovered the next time you open the page. The app asks
     the browser to treat this storage as permanent.
-  - "Also save to a file on my computer" (Chrome/Edge) writes the recording
-    into a file you pick, as it records. Any saved recording can also be
-    downloaded with its subtitles, or deleted.
+  - **Download automatically** when you stop (on by default).
+  - **Auto-save to a folder on your computer**, such as the Desktop
+    (Chrome/Edge): choose the folder once and every recording is written
+    straight into it while recording, with a .vtt subtitle file next to it.
+    The browser may ask you to allow access again after a restart. In other
+    browsers, auto-download saves to your Downloads folder (change the
+    browser's download location to use the Desktop).
+  - Any saved recording can also be downloaded with its subtitles, or deleted.
+- **Separate screen and sound files**: record the screen with sound in one
+  file, or the screen (no sound) and the sound as two separate files that
+  start at the same moment, or just the sound, or just the screen.
 - **Binaural-beat meter**: shows the difference between the left- and
   right-ear tones (how Robert Monroe's Hemi-Sync works), with its brainwave
   band and use.

@@ -14,6 +14,9 @@ const defaults = {
   holdMs: 250,
   dnStrength: 1.5,
   dnFloorDb: -24,
+  mode: 'combined',        // combined | separate | audio | video
+  autoDownload: true,
+  saveFolder: false,
 };
 const settings = loadSettings();
 
@@ -390,7 +393,7 @@ function readSpectrum() {
 
 function drawPreview() {
   const v = display && display.video;
-  const hasVideo = v && v.videoWidth > 0 && !$('opt-audio-only').checked;
+  const hasVideo = v && v.videoWidth > 0 && $('opt-mode').value !== 'audio';
   if (hasVideo) {
     const w = Math.min(1920, v.videoWidth);
     const h = Math.round((v.videoHeight / v.videoWidth) * w);
@@ -494,10 +497,21 @@ const mediaUrls = new Map(); // recording id -> { media, vtt, srt } object URLs
 const log = [];
 let storageWarned = false;
 
-function pickMime(audioOnly) {
-  const list = audioOnly
+// Each recording makes one or more "parts" (files): the combined video, or a
+// separate screen file and sound file that start at the same moment.
+const PART_KINDS = {
+  combined: [{ kind: 'combined', audio: true, video: true }],
+  separate: [{ kind: 'screen', audio: false, video: true }, { kind: 'audio', audio: true, video: false }],
+  audio: [{ kind: 'audio', audio: true, video: false }],
+  video: [{ kind: 'screen', audio: false, video: true }],
+};
+
+function pickMime(audio, video) {
+  const list = !video
     ? ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm']
-    : ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
+    : audio
+      ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']
+      : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
   return list.find((m) => MediaRecorder.isTypeSupported(m)) || '';
 }
 
@@ -516,139 +530,176 @@ function buildCues(startedAt, stoppedAt) {
     }));
 }
 
-function storageFailed(err) {
-  if (recorder) recorder.storageOk = false;
+function storageFailed(part, err) {
+  part.storageOk = false;
   if (!storageWarned) {
     storageWarned = true;
     toast(`Couldn't save to this website's storage (${err && err.message}). The recording is kept in memory; download it before closing the tab.`, 10000);
   }
 }
 
+// ---------------------------------------------- auto-save to a folder (Desktop) --
+
+let folderHandle = null;   // FileSystemDirectoryHandle chosen by the user
+
+async function pickFolder() {
+  try {
+    folderHandle = await window.showDirectoryPicker({ id: 'recordings', mode: 'readwrite', startIn: 'desktop' });
+    await store.setValue('saveFolder', folderHandle).catch(() => {});
+    $('opt-save-folder').checked = true;
+    settings.saveFolder = true;
+    saveSettings();
+  } catch (err) {
+    if (err.name !== 'AbortError') toast('Could not use that folder: ' + err.message, 6000);
+  }
+  renderFolder();
+}
+
+function renderFolder() {
+  $('folder-name').textContent = folderHandle ? `Saving to: ${folderHandle.name}` : 'No folder chosen yet';
+  $('btn-pick-folder').textContent = folderHandle ? 'Change folder' : 'Choose folder (e.g. Desktop)';
+}
+
+// Returns the folder if we may write to it, asking again if the browser needs it.
+// Must run straight from the Record click so the browser allows the prompt.
+async function folderForRecording() {
+  if (!$('opt-save-folder').checked) return null;
+  if (!folderHandle) {
+    await pickFolder();
+    if (!folderHandle) return null;
+  }
+  const mode = { mode: 'readwrite' };
+  try {
+    if ((await folderHandle.queryPermission(mode)) === 'granted') return folderHandle;
+    if ((await folderHandle.requestPermission(mode)) === 'granted') return folderHandle;
+  } catch {}
+  toast(`No permission to save in "${folderHandle.name}". Recording to the website only.`, 7000);
+  return null;
+}
+
+// --------------------------------------------------------------- record --
+
 async function startRecording() {
   if (!nodes || recorder) return;
-  const audioOnly = $('opt-audio-only').checked;
-  const mimeType = pickMime(audioOnly);
-  const ext = extFor(mimeType, audioOnly);
+  const mode = $('opt-mode').value;
   const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-  const name = `recording-${stamp}`;
-
-  // Optional: write straight into a file on the computer while recording.
-  let fileWriter = null;
-  if ($('opt-save-disk').checked && window.showSaveFilePicker) {
-    try {
-      const base = mimeType.split(';')[0] || (audioOnly ? 'audio/webm' : 'video/webm');
-      const handle = await window.showSaveFilePicker({
-        suggestedName: `${name}.${ext}`,
-        types: [{ description: audioOnly ? 'Audio' : 'Video', accept: { [base]: ['.' + ext] } }],
-      });
-      fileWriter = await handle.createWritable();
-    } catch (err) {
-      if (err.name === 'AbortError') return; // user cancelled the save dialog
-      toast('Could not open the file on your computer: ' + err.message + '. Recording to the website only.', 7000);
-    }
-  }
+  const baseName = `recording-${stamp}`;
+  const folder = await folderForRecording();
   store.requestPersistence().then(renderStorageInfo).catch(() => {});
 
-  const tracks = [...nodes.recDest.stream.getAudioTracks()];
-  let usesDisplayTrack = false;
-  if (!audioOnly) {
+  const kinds = PART_KINDS[mode] || PART_KINDS.combined;
+  const audioTrack = nodes.recDest.stream.getAudioTracks()[0];
+  let videoTrack = null, usesDisplayTrack = false, canvasTrack = null;
+  if (kinds.some((k) => k.video)) {
     if (display && !$('opt-burn').checked) {
-      tracks.push(display.stream.getVideoTracks()[0]);
+      videoTrack = display.stream.getVideoTracks()[0];
       usesDisplayTrack = true;
     } else {
-      tracks.push(preview.captureStream(30).getVideoTracks()[0]);
+      videoTrack = canvasTrack = preview.captureStream(30).getVideoTracks()[0];
     }
   }
-  let mr;
+
+  const r = { startedAt: 0, usesDisplayTrack, canvasTrack, baseName, folder, parts: [] };
   try {
-    mr = new MediaRecorder(new MediaStream(tracks), mimeType ? { mimeType } : undefined);
+    for (const k of kinds) {
+      const mimeType = pickMime(k.audio, k.video);
+      const tracks = [...(k.audio ? [audioTrack] : []), ...(k.video ? [videoTrack] : [])];
+      const mr = new MediaRecorder(new MediaStream(tracks), mimeType ? { mimeType } : undefined);
+      const mime = mr.mimeType || mimeType || (k.video ? 'video/webm' : 'audio/webm');
+      const ext = extFor(mime, !k.video);
+      const name = kinds.length > 1 ? `${baseName}-${k.kind}` : baseName;
+      r.parts.push({
+        mr, kind: k.kind, storageOk: true, pending: new Map(), seq: 0,
+        rec: { id: uid(), name, ext, mime, audioOnly: !k.video, kind: k.kind, group: baseName, createdAt: Date.now(), seconds: 0, size: 0, cues: [], complete: false },
+      });
+    }
   } catch (err) {
-    fileWriter && fileWriter.abort().catch(() => {});
+    canvasTrack && canvasTrack.stop();
     toast('Could not start recording: ' + err.message, 6000);
     return;
   }
 
-  const startedAt = performance.now();
-  const rec = {
-    id: uid(), name, ext, mime: mr.mimeType || mimeType, audioOnly,
-    createdAt: Date.now(), seconds: 0, size: 0, cues: [], complete: false,
-  };
-  const r = {
-    mr, rec, startedAt, usesDisplayTrack, fileWriter, storageOk: true,
-    canvasTrack: usesDisplayTrack || audioOnly ? null : tracks[tracks.length - 1],
-    pending: new Map(), // chunks not yet confirmed saved, by sequence number
-    seq: 0,
-    saveChain: store.putRecording(rec).catch(storageFailed),
-    diskChain: Promise.resolve(),
-  };
-  recorder = r;
-
-  mr.ondataavailable = (e) => {
-    if (!e.data.size) return;
-    const blob = e.data, seq = r.seq++;
-    r.pending.set(seq, blob);
-    rec.size += blob.size;
-    rec.seconds = (performance.now() - startedAt) / 1000;
-    r.saveChain = r.saveChain
-      .then(() => (r.storageOk ? store.putChunk(rec.id, seq, blob) : Promise.reject(null)))
-      .then(() => {
-        r.pending.delete(seq);
-        if (seq % 5 === 0) {
-          return store.updateRecording(rec.id, { size: rec.size, seconds: rec.seconds, cues: buildCues(startedAt, performance.now()) });
-        }
-      })
-      .catch((err) => err && storageFailed(err));
-    if (r.fileWriter) {
-      r.diskChain = r.diskChain.then(() => r.fileWriter && r.fileWriter.write(blob)).catch((err) => {
-        r.fileWriter = null;
-        toast('Writing to the file on your computer failed: ' + err.message + '. It is still saved on the website.', 8000);
-      });
+  // Open a file in the chosen folder for each part, written to as it records.
+  for (const part of r.parts) {
+    part.diskChain = Promise.resolve();
+    if (!folder) continue;
+    try {
+      const fh = await folder.getFileHandle(`${part.rec.name}.${part.rec.ext}`, { create: true });
+      part.fileWriter = await fh.createWritable();
+    } catch (err) {
+      toast(`Could not create a file in "${folder.name}": ${err.message}. Recording to the website only.`, 7000);
     }
-  };
-  mr.onstop = () => finishRecording(r);
-  mr.start(1000);
+  }
+
+  r.startedAt = performance.now();
+  recorder = r;
+  const stopped = [];
+  for (const part of r.parts) {
+    const { mr, rec } = part;
+    part.saveChain = store.putRecording(rec).catch((err) => storageFailed(part, err));
+    mr.ondataavailable = (e) => {
+      if (!e.data.size) return;
+      const blob = e.data, seq = part.seq++;
+      part.pending.set(seq, blob);
+      rec.size += blob.size;
+      rec.seconds = (performance.now() - r.startedAt) / 1000;
+      part.saveChain = part.saveChain
+        .then(() => (part.storageOk ? store.putChunk(rec.id, seq, blob) : Promise.reject(null)))
+        .then(() => {
+          part.pending.delete(seq);
+          if (seq % 5 === 0) {
+            return store.updateRecording(rec.id, { size: rec.size, seconds: rec.seconds, cues: buildCues(r.startedAt, performance.now()) });
+          }
+        })
+        .catch((err) => err && storageFailed(part, err));
+      if (part.fileWriter) {
+        part.diskChain = part.diskChain.then(() => part.fileWriter && part.fileWriter.write(blob)).catch((err) => {
+          part.fileWriter = null;
+          toast('Writing to the file on your computer failed: ' + err.message + '. It is still saved on the website.', 8000);
+        });
+      }
+    };
+    stopped.push(new Promise((resolve) => { mr.onstop = resolve; }));
+  }
+  Promise.all(stopped).then(() => finishRecording(r));
+  for (const part of r.parts) part.mr.start(1000);
 
   $('rec-badge').hidden = false;
   $('btn-stop').disabled = false;
-  for (const id of ['opt-audio-only', 'opt-burn', 'opt-save-disk']) $(id).disabled = true;
+  for (const id of RECORD_LOCKED) $(id).disabled = true;
   updateSources();
 }
+
+const RECORD_LOCKED = ['opt-mode', 'opt-burn', 'opt-save-folder', 'btn-pick-folder'];
 
 function stopRecording() {
   if (!recorder || recorder.stoppedAt) return;
   recorder.stoppedAt = performance.now();
-  recorder.mr.stop();
+  for (const part of recorder.parts) if (part.mr.state !== 'inactive') part.mr.stop();
 }
 
-async function finishRecording(r) {
-  const { rec, startedAt, stoppedAt = performance.now(), canvasTrack } = r;
-  canvasTrack && canvasTrack.stop();
-  recorder = null;
-  $('rec-badge').hidden = true;
-  $('btn-stop').disabled = true;
-  for (const id of ['opt-audio-only', 'opt-burn', 'opt-save-disk']) $(id).disabled = false;
-  updateSources();
-
-  rec.seconds = (stoppedAt - startedAt) / 1000;
-  rec.cues = buildCues(startedAt, stoppedAt);
+async function finishPart(r, part, cues) {
+  const { rec } = part;
+  rec.seconds = (r.stoppedAt - r.startedAt) / 1000;
+  rec.cues = cues;
   rec.complete = true;
 
-  await r.saveChain;
-  let savedToSite = r.storageOk;
+  await part.saveChain;
+  let savedToSite = part.storageOk;
   if (savedToSite) {
     try {
       await store.updateRecording(rec.id, { size: rec.size, seconds: rec.seconds, cues: rec.cues, complete: true });
     } catch (err) {
-      storageFailed(err);
+      storageFailed(part, err);
       savedToSite = false;
     }
   }
 
   let savedToDisk = false;
-  await r.diskChain;
-  if (r.fileWriter) {
+  await part.diskChain;
+  if (part.fileWriter) {
     try {
-      await r.fileWriter.close();
+      await part.fileWriter.close();
       savedToDisk = true;
     } catch (err) {
       toast('Finishing the file on your computer failed: ' + err.message, 8000);
@@ -659,15 +710,65 @@ async function finishRecording(r) {
     // Keep it in memory, combining what did get stored with what didn't.
     const stored = await store.getChunkRows(rec.id).catch(() => []);
     const all = new Map(stored.map((c) => [c.seq, c.blob]));
-    for (const [seq, blob] of r.pending) all.set(seq, blob);
-    const blob = new Blob([...all.keys()].sort((a, b) => a - b).map((k) => all.get(k)), { type: rec.mime.split(';')[0] });
-    rec.memoryBlob = blob;
+    for (const [seq, blob] of part.pending) all.set(seq, blob);
+    rec.memoryBlob = new Blob([...all.keys()].sort((a, b) => a - b).map((k) => all.get(k)), { type: rec.mime.split(';')[0] });
     rec.unsaved = true;
   }
-  if (savedToSite || savedToDisk) {
-    toast(`Saved ${rec.name}` + (savedToSite ? ' to this website' : '') + (savedToSite && savedToDisk ? ' and' : '') + (savedToDisk ? ' to your computer' : '') + '.');
+  rec.savedToDisk = savedToDisk;
+  if (savedToSite) await store.updateRecording(rec.id, { savedToDisk }).catch(() => {});
+  return { savedToSite, savedToDisk };
+}
+
+async function finishRecording(r) {
+  r.stoppedAt = r.stoppedAt || performance.now();
+  r.canvasTrack && r.canvasTrack.stop();
+  recorder = null;
+  $('rec-badge').hidden = true;
+  $('btn-stop').disabled = true;
+  for (const id of RECORD_LOCKED) $(id).disabled = id !== 'opt-mode' && id !== 'opt-burn' && !window.showDirectoryPicker;
+  updateSources();
+
+  const cues = buildCues(r.startedAt, r.stoppedAt);
+  const results = await Promise.all(r.parts.map((part) => finishPart(r, part, cues)));
+  const site = results.every((x) => x.savedToSite);
+  const disk = results.some((x) => x.savedToDisk);
+
+  if (disk && cues.length) {
+    // Subtitles next to the files in the folder.
+    try {
+      const fh = await r.folder.getFileHandle(`${r.baseName}.vtt`, { create: true });
+      const w = await fh.createWritable();
+      await w.write(toVtt(cues));
+      await w.close();
+    } catch {}
   }
-  await refreshLibrary(savedToSite ? [] : [rec]);
+
+  const unsaved = r.parts.filter((p) => p.rec.unsaved).map((p) => p.rec);
+  await refreshLibrary(unsaved);
+
+  let downloaded = false;
+  if ($('opt-auto-download').checked) {
+    for (const part of r.parts) {
+      try {
+        const u = await urlsFor(part.rec);
+        triggerDownload(u.media, `${part.rec.name}.${part.rec.ext}`);
+        downloaded = true;
+      } catch {}
+    }
+  }
+
+  const where = [site && 'this website', disk && `"${r.folder.name}" on your computer`, downloaded && 'your downloads'].filter(Boolean);
+  const what = r.parts.length > 1 ? `${r.parts.length} files (${r.parts.map((p) => p.kind).join(' + ')})` : `${r.parts[0].rec.name}.${r.parts[0].rec.ext}`;
+  if (where.length) toast(`Saved ${what} to ${where.join(', ').replace(/, ([^,]*)$/, ' and $1')}.`, 5000);
+}
+
+function triggerDownload(href, filename) {
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function toVtt(cues) {
@@ -728,7 +829,7 @@ async function renderRecordings() {
   }
   const rows = [];
   for (const rec of library) {
-    if (recorder && recorder.rec.id === rec.id) continue;
+    if (recorder && recorder.parts.some((p) => p.rec.id === rec.id)) continue;
     let u;
     try { u = await urlsFor(rec); } catch { continue; }
     const cues = Array.isArray(rec.cues) ? rec.cues.length : 0;
@@ -756,11 +857,12 @@ async function renderRecordings() {
         <button class="small" data-del>Delete</button>
       </div>`;
     info.querySelector('.rec-name').textContent = `${rec.name}.${rec.ext}`;
-    info.querySelector('.rec-status').textContent = rec.unsaved
+    const kindLabel = { screen: 'Screen (no sound)', audio: 'Sound', combined: 'Screen with sound' }[rec.kind] || (rec.audioOnly ? 'Sound' : 'Screen with sound');
+    info.querySelector('.rec-status').textContent = kindLabel + ' · ' + (rec.unsaved
       ? '⚠ Not saved on the website (storage failed) — download it before closing this tab.'
       : rec.recovered
         ? '✓ Saved on this website · recovered after an interruption'
-        : '✓ Saved on this website';
+        : '✓ Saved on this website') + (rec.savedToDisk ? ' · ✓ saved to your folder' : '');
     info.querySelector('[data-del]').addEventListener('click', async () => {
       if (!confirm(`Delete ${rec.name}.${rec.ext} from this website? Copies you downloaded are not affected.`)) return;
       if (!rec.unsaved) await store.deleteRecording(rec.id);
@@ -1019,11 +1121,25 @@ function init() {
   pctx.fillStyle = '#0d0f13';
   pctx.fillRect(0, 0, preview.width, preview.height);
 
-  if (!window.showSaveFilePicker) {
-    $('opt-save-disk').checked = false;
-    $('opt-save-disk').disabled = true;
-    $('save-disk-label').title = 'Your browser can\'t write files directly; use the Download buttons instead.';
-    $('save-disk-label').classList.add('muted');
+  $('opt-mode').value = PART_KINDS[settings.mode] ? settings.mode : 'combined';
+  $('opt-auto-download').checked = !!settings.autoDownload;
+  $('opt-save-folder').checked = !!settings.saveFolder;
+  $('opt-mode').addEventListener('change', () => { settings.mode = $('opt-mode').value; saveSettings(); });
+  $('opt-auto-download').addEventListener('change', () => { settings.autoDownload = $('opt-auto-download').checked; saveSettings(); });
+  $('opt-save-folder').addEventListener('change', async () => {
+    settings.saveFolder = $('opt-save-folder').checked;
+    saveSettings();
+    if (settings.saveFolder && !folderHandle) await pickFolder();
+  });
+  $('btn-pick-folder').addEventListener('click', pickFolder);
+  if (window.showDirectoryPicker) {
+    store.getValue('saveFolder').then((h) => { if (h) folderHandle = h; }).catch(() => {}).finally(renderFolder);
+  } else {
+    $('opt-save-folder').checked = false;
+    $('opt-save-folder').disabled = true;
+    $('btn-pick-folder').hidden = true;
+    $('save-folder-label').classList.add('muted');
+    $('folder-name').textContent = 'Your browser can\'t save into a folder directly. Auto-download saves to your Downloads folder; to use the Desktop, change your browser\'s download location.';
   }
   window.addEventListener('beforeunload', (e) => {
     if (recorder || library.some((r) => r.unsaved)) { e.preventDefault(); e.returnValue = ''; }
@@ -1034,4 +1150,4 @@ function init() {
 init();
 
 // Exposed for automated tests.
-window.__freqRecorder = { settings, detected, log, store, get library() { return library; }, startTones, stopTones, startRecording, stopRecording, ensureAudio, get nodes() { return nodes; } };
+window.__freqRecorder = { settings, detected, log, store, get library() { return library; }, startTones, stopTones, startRecording, stopRecording, get recorder() { return recorder; }, ensureAudio, get nodes() { return nodes; } };

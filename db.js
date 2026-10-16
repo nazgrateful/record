@@ -5,18 +5,22 @@
 // recording whose `complete` flag never got set is recovered on next load.
 
 const DB_NAME = 'freq-recorder';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
 
 function open() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
       const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = () => {
+      req.onupgradeneeded = (e) => {
         const db = req.result;
-        db.createObjectStore('recordings', { keyPath: 'id' });
-        const chunks = db.createObjectStore('chunks', { keyPath: ['recId', 'seq'] });
-        chunks.createIndex('recId', 'recId');
+        if (e.oldVersion < 1) {
+          db.createObjectStore('recordings', { keyPath: 'id' });
+          const chunks = db.createObjectStore('chunks', { keyPath: ['recId', 'seq'] });
+          chunks.createIndex('recId', 'recId');
+        }
+        // Small key/value store, e.g. the folder chosen for auto-saving.
+        if (e.oldVersion < 2) db.createObjectStore('kv');
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -95,6 +99,18 @@ export async function deleteRecording(recId) {
         cursor.continue();
       }
     };
+  });
+}
+
+export async function getValue(key) {
+  const db = await open();
+  return done(db.transaction('kv').objectStore('kv').get(key));
+}
+
+export async function setValue(key, value) {
+  await tx(['kv'], 'readwrite', (t) => {
+    if (value === undefined) t.objectStore('kv').delete(key);
+    else t.objectStore('kv').put(value, key);
   });
 }
 
