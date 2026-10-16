@@ -121,7 +121,8 @@ label.button { display: inline-block; cursor: pointer; background: var(--accent)
 .ed-goto { width: 150px; }
 .ed-name { width: 240px; max-width: 100%; }
 #ed-format, #ed-bitrate, .convert select { max-width: 100%; }
-select { min-width: 0; }
+select { min-width: 0; max-width: 100%; }
+.options label { max-width: 100%; }
 .ed-busy #ed-body button { pointer-events: none; opacity: .5; }
 
 .health-box { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
@@ -133,7 +134,7 @@ select { min-width: 0; }
 .health.bad .icon { color: var(--rec); }
 .health .muted { font-size: 13px; }
 #sc-progress { width: min(300px, 50%); }
-.convert { display: inline-flex; gap: 6px; align-items: center; }
+.convert { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: 100%; }
 .convert select { max-width: 190px; padding: 3px 6px; font-size: 13px; }
 
 #notice { max-width: 1068px; margin: 8px auto 0; padding: 10px 14px; border-radius: 10px; background: #fff4d6; color: #5c4400; border: 1px solid #e8c25a; }
@@ -168,6 +169,6 @@ select { min-width: 0; }
 @media (max-width: 640px) {
   .now { grid-template-columns: 1fr 1fr; }
   .now > :first-child { grid-column: 1 / -1; }
-  .recording { grid-template-columns: 1fr; }
+  .recording { grid-template-columns: minmax(0, 1fr); }
   .targets th:nth-child(3), .targets td:nth-child(3) { display: none; }
 }

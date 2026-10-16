@@ -110,6 +110,12 @@
             <option value="video">Screen only (no sound)</option>
           </select>
         </label>
+        <label>File type
+          <select id="opt-filetype">
+            <option value="mp4">MP4 (plays everywhere: iPhone, Windows, Mac)</option>
+            <option value="webm">WebM</option>
+          </select>
+        </label>
       </div>
       <div class="row options">
         <label><input type="checkbox" id="opt-auto-download" checked> Download automatically when I stop</label>
@@ -189,11 +195,12 @@
 
     <section class="card">
       <h2>5. Saved recordings</h2>
-      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. They're also downloaded automatically when you stop (if that's turned on), and can be written straight into a folder you choose, such as your Desktop. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
+      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. They're also downloaded automatically when you stop (if that's turned on), and can be written straight into a folder you choose, such as your Desktop. Each one also has subtitle files (.vtt / .srt) of the names detected. Screen recordings are saved here too: download them as they are, or use <b>Convert &amp; download</b> / <b>Save converted copy</b> to get an MP4 that plays on iPhones, Windows and Macs. <b>Add video or audio files</b> keeps copies of other files (e.g. screen recordings made with another app) here as well.</p>
       <p class="hint" id="storage-info"></p>
       <div class="row">
         <button id="btn-backup">Back up everything to a folder…</button>
         <button id="btn-restore">Restore from a backup folder…</button>
+        <label class="button">Add video or audio files…<input type="file" id="add-files" accept="video/*,audio/*,.webm,.mkv,.mov,.mp4,.m4a,.mp3,.wav,.ogg,.opus,.flac" multiple hidden></label>
       </div>
       <p class="hint" id="backup-hint">Updates to this website never remove your recordings. A backup folder also protects them if the browser's data gets cleared or you switch computers: backing up again only copies new recordings, and restoring only adds missing ones.</p>
       <div id="recordings"><p class="muted">Nothing recorded yet.</p></div>

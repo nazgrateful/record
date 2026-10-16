@@ -3,6 +3,7 @@ import * as store from './db.js';
 import { initEditor, openFile as openInEditor, openForTones, fillFormats, renderHealthList } from './editor.js';
 import { Stats, liveSuggestions } from './health.js';
 import { encode, fileSource, formatById, downloadParts } from './export.js';
+import { convertVideo, recorderMp4, VIDEO_FORMATS } from './video.js';
 
 const $ = (id) => document.getElementById(id);
 const COLORS = ['#ff6b6b', '#4dabf7', '#ffd43b', '#69db7c', '#da77f2', '#ff922b', '#38d9a9', '#f783ac'];
@@ -21,6 +22,7 @@ const defaults = {
   hum: 0,                  // live mains hum filter: 0 (off), 50 or 60 Hz
   toneLayers: [],          // editor "Add frequencies" layers
   mode: 'combined',        // combined | separate | audio | video
+  fileType: 'mp4',         // new recordings: 'mp4' when the browser can, else 'webm'
   autoDownload: true,
   saveFolder: false,
 };
@@ -534,6 +536,11 @@ const PART_KINDS = {
 };
 
 function pickMime(audio, video) {
+  // MP4 (H.264/AAC) plays everywhere, including iPhones and Windows' player.
+  if (settings.fileType === 'mp4') {
+    const mp4 = recorderMp4(audio, video);
+    if (mp4) return mp4;
+  }
   const list = !video
     ? ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm']
     : audio
@@ -718,7 +725,7 @@ function releaseWake() {
   wakeLock = null;
 }
 
-const RECORD_LOCKED = ['opt-mode', 'opt-burn', 'opt-save-folder', 'btn-pick-folder', 'opt-stop-h', 'opt-stop-m'];
+const RECORD_LOCKED = ['opt-mode', 'opt-filetype', 'opt-burn', 'opt-save-folder', 'btn-pick-folder', 'opt-stop-h', 'opt-stop-m'];
 
 function stopRecording() {
   if (!recorder || recorder.stoppedAt) return;
@@ -937,7 +944,7 @@ async function renderRecordings() {
         <a class="button-link" download="${rec.name}.${rec.ext}" href="${u.media}">Download recording</a>
         <a download="${rec.name}.vtt" href="${u.vtt}">Subtitles (.vtt)</a>
         <a download="${rec.name}.srt" href="${u.srt}">Subtitles (.srt)</a>
-        <span class="convert"><select data-fmt aria-label="Convert to"></select><button class="small" data-convert>Convert &amp; download</button></span>
+        <span class="convert"><select data-fmt aria-label="Convert to"></select><button class="small" data-convert>Convert &amp; download</button><button class="small" data-save-conv title="Keep the converted copy in Saved recordings">Save converted copy</button></span>
         <button class="small" data-edit>Edit</button>
         <button class="small" data-tones>Add frequencies</button>
         <button class="small" data-del>Delete</button>
@@ -950,8 +957,9 @@ async function renderRecordings() {
         ? '✓ Saved on this website · recovered after an interruption'
         : rec.restored ? '✓ Restored from a backup' : rec.imported ? '✓ Imported' : '✓ Saved on this website') + (rec.savedToDisk ? ' · ✓ saved to your folder' : '');
     const fmtSel = info.querySelector('[data-fmt]');
-    fillFormats(fmtSel);
+    fillFormats(fmtSel, { video: !rec.audioOnly && rec.ext === 'webm' });
     info.querySelector('[data-convert]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target));
+    info.querySelector('[data-save-conv]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target, { save: true }));
     info.querySelector('[data-tones]').addEventListener('click', async () => {
       try {
         openForTones(rec.memoryBlob || (await store.getBlob(rec)), rec.name);
@@ -995,14 +1003,14 @@ function fixDuration(media) {
 
 // Saves a file made of Blob parts (from the editor) as a recording on the
 // site, and into the auto-save folder if that's on.
-async function saveStream({ name, ext, mime, seconds, parts }) {
+async function saveStream({ name, ext, mime, seconds, parts, video = false }) {
   const folder = await folderForRecording();
   let writer = null;
   if (folder) {
     try { writer = await (await folder.getFileHandle(`${name}.${ext}`, { create: true })).createWritable(); }
     catch (err) { toast(`Could not create a file in "${folder.name}": ${err.message}`, 7000); }
   }
-  const rec = { id: uid(), name, ext, mime, audioOnly: true, kind: 'edited', createdAt: Date.now(), seconds, size: 0, cues: [], complete: false };
+  const rec = { id: uid(), name, ext, mime, audioOnly: !video, kind: video ? 'combined' : 'edited', converted: video || undefined, createdAt: Date.now(), seconds, size: 0, cues: [], complete: false };
   await store.putRecording(rec);
   try {
     let seq = 0, pos = 0;
@@ -1033,23 +1041,27 @@ async function saveStream({ name, ext, mime, seconds, parts }) {
 
 // Converts a saved recording (its sound) to another format and downloads it,
 // decoding and encoding on the fly.
-async function convertRecording(rec, formatId, btn) {
-  const f = formatById(formatId);
+async function convertRecording(rec, formatId, btn, { save = false } = {}) {
+  const vf = VIDEO_FORMATS.find((v) => v.id === formatId);
+  const f = vf || formatById(formatId);
   const filename = `${rec.name}.${f.ext}`;
   const label = btn.textContent;
   btn.disabled = true;
   let done = 0;
   const timer = setInterval(() => { btn.textContent = `Converting… ${Math.round(done * 100)}%`; }, 500);
+  const onProgress = (x) => { done = x; };
   try {
     const blob = rec.memoryBlob || (await store.getBlob(rec));
-    const ok = await downloadParts(() => {
-      const parts = (async function* () {
+    const makeParts = () => vf
+      ? convertVideo(blob, vf.ext, { onProgress })
+      : (async function* () {
         const src = await fileSource(blob, { fallback: (buf) => new OfflineAudioContext(1, 1, 48000).decodeAudioData(buf) });
-        yield* encode(src, f.id, { bitrate: 192000, onProgress: (x) => { done = x; } });
+        yield* encode(src, f.id, { bitrate: 192000, onProgress });
       })();
-      return parts;
-    }, filename, f.mime);
-    if (ok) toast(`Converted to ${filename}.`);
+    if (save) {
+      // A new entry in Saved recordings (and the auto-save folder, if on).
+      await saveStream({ name: rec.name, ext: f.ext, mime: f.mime, seconds: rec.seconds, parts: makeParts(), video: !!vf });
+    } else if (await downloadParts(makeParts, filename, f.mime)) toast(`Converted to ${filename}.`);
   } catch (err) {
     toast('Converting failed: ' + err.message, 8000);
   } finally {
@@ -1059,14 +1071,46 @@ async function convertRecording(rec, formatId, btn) {
   }
 }
 
+// Length of an audio/video file in seconds (0 if the browser can't tell).
+function mediaDuration(file) {
+  return new Promise((resolve) => {
+    const el = document.createElement(file.type.startsWith('video/') ? 'video' : 'audio');
+    const url = URL.createObjectURL(file);
+    const done = (v) => { clearTimeout(timer); URL.revokeObjectURL(url); el.removeAttribute('src'); resolve(Number.isFinite(v) ? v : 0); };
+    const timer = setTimeout(() => done(0), 8000);
+    el.preload = 'metadata';
+    el.onerror = () => done(0);
+    el.onloadedmetadata = () => {
+      if (el.duration !== Infinity) return done(el.duration);
+      el.ondurationchange = () => { if (el.duration !== Infinity) done(el.duration); };
+      el.currentTime = 1e101;
+    };
+    el.src = url;
+  });
+}
+
+// "Add video or audio files…": keeps copies of files in Saved recordings.
+async function addFiles(files) {
+  let added = 0;
+  for (const file of files) {
+    if (!/^(video|audio)\//.test(file.type) && !/\.(webm|mp4|m4a|mov|mkv|mp3|wav|ogg|opus|flac|aac)$/i.test(file.name)) {
+      toast(`"${file.name}" isn't a video or sound file.`, 5000);
+      continue;
+    }
+    try { await saveOriginal(file); added++; } catch (err) { toast(`Couldn't add "${file.name}": ${err.message}`, 7000); }
+  }
+  if (added) toast(`Added ${added} file${added === 1 ? '' : 's'} to Saved recordings.`);
+}
+
 // Adds an imported file, unchanged, to Saved recordings.
 async function saveOriginal(file) {
   const ext = (file.name.match(/\.([^.]+)$/) || [, 'bin'])[1].toLowerCase();
-  const isVideo = file.type.startsWith('video/');
+  const isVideo = file.type.startsWith('video/') || /^(mp4|mov|mkv|webm)$/.test(ext) && !file.type.startsWith('audio/');
+  const seconds = await mediaDuration(file);
   const rec = {
-    id: uid(), name: file.name.replace(/\.[^.]+$/, ''), ext, mime: file.type || 'application/octet-stream',
+    id: uid(), name: file.name.replace(/\.[^.]+$/, ''), ext, mime: file.type || (isVideo ? `video/${ext === 'mov' ? 'quicktime' : ext}` : 'application/octet-stream'),
     audioOnly: !isVideo, kind: isVideo ? 'combined' : 'audio', imported: true,
-    createdAt: Date.now(), seconds: 0, size: file.size, cues: [], complete: false,
+    createdAt: Date.now(), seconds, size: file.size, cues: [], complete: false,
   };
   await store.putRecording(rec);
   const STEP = 8 << 20;
@@ -1574,6 +1618,14 @@ function init() {
   pctx.fillRect(0, 0, preview.width, preview.height);
 
   $('opt-mode').value = PART_KINDS[settings.mode] ? settings.mode : 'combined';
+  // New recordings as MP4 when this browser can record H.264 MP4.
+  const canMp4 = !!(window.MediaRecorder && recorderMp4(true, true));
+  const ftOpt = $('opt-filetype').querySelector('[value=mp4]');
+  ftOpt.disabled = !canMp4;
+  if (!canMp4) ftOpt.textContent += ' — not in this browser (record WebM, then Convert)';
+  $('opt-filetype').value = canMp4 && settings.fileType === 'mp4' ? 'mp4' : 'webm';
+  $('opt-filetype').addEventListener('change', () => { settings.fileType = $('opt-filetype').value; saveSettings(); });
+  $('add-files').addEventListener('change', async (e) => { await addFiles([...e.target.files]); e.target.value = ''; });
   $('opt-auto-download').checked = !!settings.autoDownload;
   $('opt-save-folder').checked = !!settings.saveFolder;
   $('opt-mode').addEventListener('change', () => { settings.mode = $('opt-mode').value; saveSettings(); });

@@ -81,6 +81,14 @@ specific frequencies** when they show up in the audio.
     fixes them in one click.
   - Works on 12-hour files: decoded sound is kept in the browser's storage in
     blocks, never all in memory; it's still there after a reload.
+- **Screen recordings saved and downloadable as video**: every screen
+  recording is kept in Saved recordings with a Download button. New ones are
+  recorded straight to **MP4** (H.264, plays on iPhone, Windows and Mac) when
+  the browser can (recent Chrome/Edge, Safari), otherwise WebM. **Convert &
+  download** / **Save converted copy** turns WebM screen recordings into MP4
+  (H.264 where the browser can encode it; otherwise the VP9 video is copied
+  into MP4 without quality loss) or WebM. **Add video or audio files** keeps
+  copies of other files on the site.
 - **Convert / download in other formats**: MP3, M4A (AAC, where the browser
   can encode it, e.g. Chrome on Windows/macOS), Opus in OGG or WebM, and
   WAV 16-bit, 24-bit or 32-bit float. From the editor, or **Convert &
@@ -156,6 +164,7 @@ microphone still works there.
 - `decoders.js`: streaming import (WAV, WebM/MKV, Ogg, MP3, MP4/M4A).
 - `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
 - `tones.js`: tone / binaural-beat generator for Add frequencies.
+- `video.js`: screen-recording conversion to MP4/WebM (WebCodecs + muxers).
 - `stretch.js`: speed changes (time-stretch keeping pitch, and resampling).
 - `street.js`: the street-noise finder.
 - `health.js`: the audio health check and sound check suggestions.
