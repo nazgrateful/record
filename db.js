@@ -5,7 +5,7 @@
 // recording whose `complete` flag never got set is recovered on next load.
 
 const DB_NAME = 'freq-recorder';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let dbPromise = null;
 
 function open() {
@@ -21,6 +21,12 @@ function open() {
         }
         // Small key/value store, e.g. the folder chosen for auto-saving.
         if (e.oldVersion < 2) db.createObjectStore('kv');
+        // Audio editor: decoded sound in blocks (16-bit samples) and each
+        // block's length and waveform peaks, kept apart so peaks load fast.
+        if (e.oldVersion < 3) {
+          db.createObjectStore('pcm');
+          db.createObjectStore('pcmMeta');
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
@@ -29,10 +35,10 @@ function open() {
   return dbPromise;
 }
 
-async function tx(stores, mode, fn) {
+async function tx(stores, mode, fn, durability = 'strict') {
   const db = await open();
   return new Promise((resolve, reject) => {
-    const t = db.transaction(stores, mode, { durability: 'strict' });
+    const t = db.transaction(stores, mode, { durability });
     let result;
     t.oncomplete = () => resolve(result);
     t.onerror = () => reject(t.error);
@@ -111,6 +117,44 @@ export async function setValue(key, value) {
   await tx(['kv'], 'readwrite', (t) => {
     if (value === undefined) t.objectStore('kv').delete(key);
     else t.objectStore('kv').put(value, key);
+  });
+}
+
+// ------------------------------------------------------ editor audio blocks --
+
+export async function putBlock(key, channels, meta) {
+  await tx(['pcm', 'pcmMeta'], 'readwrite', (t) => {
+    t.objectStore('pcm').put(channels, key);
+    t.objectStore('pcmMeta').put(meta, key);
+  }, 'relaxed');
+}
+
+export async function getBlock(key) {
+  const db = await open();
+  return done(db.transaction('pcm').objectStore('pcm').get(key));
+}
+
+const prefixRange = (prefix) => IDBKeyRange.bound(prefix, prefix + '\uffff');
+
+// All [key, meta] pairs whose key starts with prefix.
+export async function listBlockMeta(prefix) {
+  const db = await open();
+  const os = db.transaction('pcmMeta').objectStore('pcmMeta');
+  const [keys, values] = await Promise.all([done(os.getAllKeys(prefixRange(prefix))), done(os.getAll(prefixRange(prefix)))]);
+  return keys.map((k, i) => [k, values[i]]);
+}
+
+export async function deleteBlocks(prefix) {
+  await tx(['pcm', 'pcmMeta'], 'readwrite', (t) => {
+    t.objectStore('pcm').delete(prefixRange(prefix));
+    t.objectStore('pcmMeta').delete(prefixRange(prefix));
+  });
+}
+
+export async function deleteBlockKeys(keys) {
+  if (!keys.length) return;
+  await tx(['pcm', 'pcmMeta'], 'readwrite', (t) => {
+    for (const k of keys) { t.objectStore('pcm').delete(k); t.objectStore('pcmMeta').delete(k); }
   });
 }
 

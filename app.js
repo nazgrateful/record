@@ -1,5 +1,8 @@
 import { PRESET_LIBRARY, NOTE_NAMES, noteToFreq, freqToNote, beatBand } from './presets.js';
 import * as store from './db.js';
+import { initEditor, openFile as openInEditor, fillFormats, renderHealthList } from './editor.js';
+import { Stats, liveSuggestions } from './health.js';
+import { encode, fileSource, formatById, downloadParts } from './export.js';
 
 const $ = (id) => document.getElementById(id);
 const COLORS = ['#ff6b6b', '#4dabf7', '#ffd43b', '#69db7c', '#da77f2', '#ff922b', '#38d9a9', '#f783ac'];
@@ -14,6 +17,8 @@ const defaults = {
   holdMs: 250,
   dnStrength: 1.5,
   dnFloorDb: -24,
+  micGainDb: 0,
+  hum: 0,                  // live mains hum filter: 0 (off), 50 or 60 Hz
   mode: 'combined',        // combined | separate | audio | video
   autoDownload: true,
   saveFolder: false,
@@ -56,6 +61,7 @@ async function ensureAudio() {
   await Promise.all([
     ctx.audioWorklet.addModule('freq-guard-worklet.js'),
     ctx.audioWorklet.addModule('denoise-worklet.js'),
+    ctx.audioWorklet.addModule('tap-worklet.js'),
   ]);
 
   const opts = { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] };
@@ -77,15 +83,22 @@ async function ensureAudio() {
 
   intIn.connect(dnInt).connect(mix);
   micIn.connect(highpass).connect(dnMic).connect(mix);
-  mix.connect(analyser);
+  // Mains hum filter: notches at the hum and its harmonics (all-pass = off).
+  const humNotches = [1, 2, 3, 4].map(() => ctx.createBiquadFilter());
+  const post = ctx.createGain();
+  humNotches.reduce((prev, f) => prev.connect(f), mix).connect(post);
+  // Copies of what will be recorded, for the sound check.
+  const tap = new AudioWorkletNode(ctx, 'tap', { numberOfInputs: 1, numberOfOutputs: 0 });
+  post.connect(tap);
+  post.connect(analyser);
   // Per-ear analysers with fine resolution (~1.5 Hz/bin) for the binaural-beat meter.
   const splitter = ctx.createChannelSplitter(2);
   const earL = ctx.createAnalyser(), earR = ctx.createAnalyser();
   for (const an of [earL, earR]) { an.fftSize = 32768; an.smoothingTimeConstant = 0.5; }
-  mix.connect(splitter);
+  post.connect(splitter);
   splitter.connect(earL, 0);
   splitter.connect(earR, 1);
-  mix.connect(guard);
+  post.connect(guard);
   guard.connect(recDest);
   // Always connected to the speakers (at zero gain unless monitoring) so the
   // graph keeps rendering and the guard keeps sending ticks.
@@ -106,7 +119,7 @@ async function ensureAudio() {
     };
   }
 
-  nodes = { intIn, micIn, highpass, dnInt, dnMic, mix, analyser, earL, earR, guard, recDest, monitor };
+  nodes = { intIn, micIn, highpass, dnInt, dnMic, mix, humNotches, post, tap, analyser, earL, earR, guard, recDest, monitor };
   sendGuardConfig();
   sendDenoiseConfig();
   applyMonitor();
@@ -130,6 +143,12 @@ function sendDenoiseConfig() {
   nodes.dnInt.port.postMessage({ enabled: $('opt-dn-int').checked, strength: settings.dnStrength, floor });
   nodes.dnMic.port.postMessage({ enabled: $('opt-dn-mic').checked, strength: settings.dnStrength, floor });
   nodes.highpass.frequency.value = $('opt-hp').checked ? 80 : 1;
+  nodes.micIn.gain.value = Math.pow(10, settings.micGainDb / 20);
+  nodes.humNotches.forEach((f, i) => {
+    f.type = settings.hum ? 'notch' : 'allpass';
+    f.frequency.value = settings.hum ? settings.hum * (i + 1) : 1000;
+    f.Q.value = settings.hum ? 30 : 0.5;
+  });
 }
 
 function applyMonitor() {
@@ -367,7 +386,14 @@ function onTick() {
   readBeat();
   drawPreview();
   drawSpectrum();
-  if (recorder) $('rec-time').textContent = fmtTime((performance.now() - recorder.startedAt) / 1000);
+  if (recorder) {
+    const secs = (performance.now() - recorder.startedAt) / 1000;
+    $('rec-time').textContent = fmtTime(secs);
+    if (recorder.limit && secs >= recorder.limit) {
+      stopRecording();
+      toast(`Stopped automatically after ${fmtTime(recorder.limit)}.`, 6000);
+    }
+  }
 }
 
 function readSpectrum() {
@@ -632,7 +658,9 @@ async function startRecording() {
   }
 
   r.startedAt = performance.now();
+  r.limit = (+$('opt-stop-h').value || 0) * 3600 + (+$('opt-stop-m').value || 0) * 60;
   recorder = r;
+  keepAwake();
   const stopped = [];
   for (const part of r.parts) {
     const { mr, rec } = part;
@@ -670,7 +698,21 @@ async function startRecording() {
   updateSources();
 }
 
-const RECORD_LOCKED = ['opt-mode', 'opt-burn', 'opt-save-folder', 'btn-pick-folder'];
+// Long recordings: stop the screen (and so the computer) from going to sleep.
+let wakeLock = null;
+async function keepAwake() {
+  if (!$('opt-wake').checked || !navigator.wakeLock || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch {}
+}
+function releaseWake() {
+  if (wakeLock) wakeLock.release().catch(() => {});
+  wakeLock = null;
+}
+
+const RECORD_LOCKED = ['opt-mode', 'opt-burn', 'opt-save-folder', 'btn-pick-folder', 'opt-stop-h', 'opt-stop-m'];
 
 function stopRecording() {
   if (!recorder || recorder.stoppedAt) return;
@@ -723,9 +765,10 @@ async function finishRecording(r) {
   r.stoppedAt = r.stoppedAt || performance.now();
   r.canvasTrack && r.canvasTrack.stop();
   recorder = null;
+  releaseWake();
   $('rec-badge').hidden = true;
   $('btn-stop').disabled = true;
-  for (const id of RECORD_LOCKED) $(id).disabled = id !== 'opt-mode' && id !== 'opt-burn' && !window.showDirectoryPicker;
+  for (const id of RECORD_LOCKED) $(id).disabled = /folder/.test(id) && !window.showDirectoryPicker;
   updateSources();
 
   const cues = buildCues(r.startedAt, r.stoppedAt);
@@ -839,6 +882,7 @@ async function renderRecordings() {
     media.controls = true;
     media.preload = 'metadata';
     media.src = u.media;
+    fixDuration(media);
     if (!rec.audioOnly) {
       const track = document.createElement('track');
       track.kind = 'subtitles';
@@ -854,15 +898,25 @@ async function renderRecordings() {
         <a class="button-link" download="${rec.name}.${rec.ext}" href="${u.media}">Download recording</a>
         <a download="${rec.name}.vtt" href="${u.vtt}">Subtitles (.vtt)</a>
         <a download="${rec.name}.srt" href="${u.srt}">Subtitles (.srt)</a>
+        <span class="convert"><select data-fmt aria-label="Convert to"></select><button class="small" data-convert>Convert &amp; download</button></span>
+        <button class="small" data-edit>Edit</button>
         <button class="small" data-del>Delete</button>
       </div>`;
     info.querySelector('.rec-name').textContent = `${rec.name}.${rec.ext}`;
-    const kindLabel = { screen: 'Screen (no sound)', audio: 'Sound', combined: 'Screen with sound' }[rec.kind] || (rec.audioOnly ? 'Sound' : 'Screen with sound');
+    const kindLabel = { screen: 'Screen (no sound)', audio: 'Sound', combined: 'Screen with sound', edited: 'Edited sound' }[rec.kind] || (rec.audioOnly ? 'Sound' : 'Screen with sound');
     info.querySelector('.rec-status').textContent = kindLabel + ' · ' + (rec.unsaved
       ? '⚠ Not saved on the website (storage failed) — download it before closing this tab.'
       : rec.recovered
         ? '✓ Saved on this website · recovered after an interruption'
-        : '✓ Saved on this website') + (rec.savedToDisk ? ' · ✓ saved to your folder' : '');
+        : rec.imported ? '✓ Imported' : '✓ Saved on this website') + (rec.savedToDisk ? ' · ✓ saved to your folder' : '');
+    const fmtSel = info.querySelector('[data-fmt]');
+    fillFormats(fmtSel);
+    info.querySelector('[data-convert]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target));
+    info.querySelector('[data-edit]').addEventListener('click', async () => {
+      try {
+        openInEditor(rec.memoryBlob || (await store.getBlob(rec)), rec.name);
+      } catch (err) { toast('Could not open it: ' + err.message, 6000); }
+    });
     info.querySelector('[data-del]').addEventListener('click', async () => {
       if (!confirm(`Delete ${rec.name}.${rec.ext} from this website? Copies you downloaded are not affected.`)) return;
       if (!rec.unsaved) await store.deleteRecording(rec.id);
@@ -878,14 +932,227 @@ async function renderRecordings() {
   box.replaceChildren(...rows);
 }
 
+// Recordings made by MediaRecorder have no length in their header, so players
+// can't show the full length or jump around. Seeking far past the end makes
+// the browser work it out; then go back to the start.
+function fixDuration(media) {
+  media.addEventListener('loadedmetadata', () => {
+    if (media.duration !== Infinity) return;
+    const back = () => {
+      if (media.duration === Infinity) return;
+      media.removeEventListener('durationchange', back);
+      media.currentTime = 0;
+    };
+    media.addEventListener('durationchange', back);
+    media.currentTime = 1e101;
+  }, { once: true });
+}
+
+// Saves a file made of Blob parts (from the editor) as a recording on the
+// site, and into the auto-save folder if that's on.
+async function saveStream({ name, ext, mime, seconds, parts }) {
+  const folder = await folderForRecording();
+  let writer = null;
+  if (folder) {
+    try { writer = await (await folder.getFileHandle(`${name}.${ext}`, { create: true })).createWritable(); }
+    catch (err) { toast(`Could not create a file in "${folder.name}": ${err.message}`, 7000); }
+  }
+  const rec = { id: uid(), name, ext, mime, audioOnly: true, kind: 'edited', createdAt: Date.now(), seconds, size: 0, cues: [], complete: false };
+  await store.putRecording(rec);
+  try {
+    let seq = 0, pos = 0;
+    for await (const p of parts) {
+      // `at: 0` parts replace the header written first (same size).
+      if (p.at === 0) {
+        await store.putChunk(rec.id, 0, p.blob);
+        if (writer) await writer.write({ type: 'write', position: 0, data: p.blob });
+        continue;
+      }
+      await store.putChunk(rec.id, seq++, p.blob);
+      rec.size += p.blob.size;
+      if (writer) await writer.write({ type: 'write', position: pos, data: p.blob });
+      pos += p.blob.size;
+    }
+    rec.complete = true;
+    rec.savedToDisk = !!writer;
+    if (writer) await writer.close();
+    await store.updateRecording(rec.id, { size: rec.size, complete: true, savedToDisk: rec.savedToDisk });
+  } catch (err) {
+    if (writer) writer.abort().catch(() => {});
+    await store.deleteRecording(rec.id).catch(() => {});
+    throw err;
+  }
+  await refreshLibrary();
+  toast(`Saved ${name}.${ext} to Saved recordings` + (rec.savedToDisk ? ` and "${folder.name}"` : '') + '.');
+}
+
+// Converts a saved recording (its sound) to another format and downloads it,
+// decoding and encoding on the fly.
+async function convertRecording(rec, formatId, btn) {
+  const f = formatById(formatId);
+  const filename = `${rec.name}.${f.ext}`;
+  const label = btn.textContent;
+  btn.disabled = true;
+  let done = 0;
+  const timer = setInterval(() => { btn.textContent = `Converting… ${Math.round(done * 100)}%`; }, 500);
+  try {
+    const blob = rec.memoryBlob || (await store.getBlob(rec));
+    const ok = await downloadParts(() => {
+      const parts = (async function* () {
+        const src = await fileSource(blob, { fallback: (buf) => new OfflineAudioContext(1, 1, 48000).decodeAudioData(buf) });
+        yield* encode(src, f.id, { bitrate: 192000, onProgress: (x) => { done = x; } });
+      })();
+      return parts;
+    }, filename, f.mime);
+    if (ok) toast(`Converted to ${filename}.`);
+  } catch (err) {
+    toast('Converting failed: ' + err.message, 8000);
+  } finally {
+    clearInterval(timer);
+    btn.textContent = label;
+    btn.disabled = false;
+  }
+}
+
+// Adds an imported file, unchanged, to Saved recordings.
+async function saveOriginal(file) {
+  const ext = (file.name.match(/\.([^.]+)$/) || [, 'bin'])[1].toLowerCase();
+  const isVideo = file.type.startsWith('video/');
+  const rec = {
+    id: uid(), name: file.name.replace(/\.[^.]+$/, ''), ext, mime: file.type || 'application/octet-stream',
+    audioOnly: !isVideo, kind: isVideo ? 'combined' : 'audio', imported: true,
+    createdAt: Date.now(), seconds: 0, size: file.size, cues: [], complete: false,
+  };
+  await store.putRecording(rec);
+  const STEP = 8 << 20;
+  for (let i = 0, seq = 0; i < file.size; i += STEP) await store.putChunk(rec.id, seq++, file.slice(i, i + STEP));
+  await store.updateRecording(rec.id, { complete: true });
+  await refreshLibrary();
+}
+
 async function renderStorageInfo() {
   const el = $('storage-info');
   const info = await store.storageInfo().catch(() => null);
   if (!info) { el.textContent = ''; return; }
   const gb = (b) => (b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${(b / 1048576).toFixed(0)} MB`);
-  el.textContent = `Website storage: ${gb(info.usage)} used of ${gb(info.quota)} available · ` +
+  const free = Math.max(0, info.quota - info.usage);
+  const hours = (bytesPerSec) => { const h = free / bytesPerSec / 3600; return h >= 100 ? '100+' : h >= 10 ? h.toFixed(0) : h.toFixed(1); };
+  el.textContent = `Website storage: ${gb(info.usage)} used of ${gb(info.quota)} available (room for about ${hours(17000)} h of sound or ${hours(400000)} h of screen video) · ` +
     (info.persisted ? 'protected from automatic cleanup ✓' : 'the browser may clear it if your disk gets full — download important recordings');
 }
+
+// ----------------------------------------------------------- sound check --
+
+// Listens to 3 s of quiet and 5 s of normal sound through the same chain
+// that gets recorded, then lists what to improve, with one-click fixes.
+let soundcheck = null;
+
+async function runSoundCheck() {
+  if (soundcheck) return;
+  await ensureAudio();
+  const box = $('soundcheck');
+  box.hidden = false;
+  $('sc-list').replaceChildren();
+  $('sc-summary').textContent = '';
+  const ctxInfo = () => ({
+    sources: !!(display || mic || tones), mic: !!mic, screenWithoutAudio: !!(display && !display.source),
+    denoiseOn: mic ? $('opt-dn-mic').checked : $('opt-dn-int').checked, learned: !$('btn-forget').disabled,
+    humFilter: settings.hum, highpass: $('opt-hp').checked, browserNs: $('opt-browser-ns').checked, monitor: $('opt-monitor').checked,
+  });
+  if (!ctxInfo().sources) {
+    show(liveSuggestions(null, null, ctxInfo()));
+    return;
+  }
+  $('btn-soundcheck').disabled = true;
+  const phases = [
+    { key: 'quiet', secs: 3, text: 'Stay quiet… (measuring the room)' },
+    { key: 'active', secs: 5, text: mic ? 'Now talk normally (or play your sound)…' : 'Now play your sound normally…' },
+  ];
+  const result = {};
+  soundcheck = true;
+  try {
+    for (const ph of phases) {
+      const st = new Stats(ctx.sampleRate, 2);
+      $('sc-step').textContent = ph.text;
+      await new Promise((resolve) => {
+        const need = ph.secs * ctx.sampleRate;
+        let got = 0;
+        // Skip the first 0.3 s of each phase (people take a moment to react).
+        let skip = Math.round(ctx.sampleRate * 0.3);
+        // The tap sends tiny 128-sample pieces; measure in half-second chunks.
+        const half = Math.round(ctx.sampleRate / 2);
+        let pend = [], pendLen = 0;
+        nodes.tap.port.onmessage = (e) => {
+          const chs = e.data;
+          if (skip > 0) { skip -= chs[0].length; return; }
+          pend.push(chs);
+          pendLen += chs[0].length;
+          if (pendLen < half && got + pendLen < need) return;
+          st.add([0, 1].map((c) => {
+            const out = new Float32Array(pendLen);
+            let o = 0;
+            for (const p of pend) { out.set(p[c] || p[0], o); o += p[0].length; }
+            return out;
+          }));
+          got += pendLen;
+          pend = []; pendLen = 0;
+          $('sc-progress').value = got / need;
+          if (got >= need) resolve();
+        };
+        nodes.tap.port.postMessage({ on: true });
+      });
+      nodes.tap.port.postMessage({ on: false });
+      result[ph.key] = st.result();
+    }
+  } finally {
+    nodes.tap.port.onmessage = null;
+    soundcheck = null;
+    $('btn-soundcheck').disabled = false;
+  }
+  show(liveSuggestions(result.quiet, result.active, ctxInfo()));
+
+  function show(items) {
+    $('sc-step').textContent = 'Sound check';
+    $('sc-progress').value = 1;
+    const bad = renderHealthList($('sc-list'), items, async (action) => {
+      applyLiveFix(action);
+      $('sc-summary').textContent = 'Fixed. Run the sound check again to see how it sounds now.';
+    });
+    $('sc-summary').textContent = bad ? `${bad} thing${bad === 1 ? '' : 's'} to improve before recording.` : 'Sounds healthy — ready to record.';
+  }
+}
+
+function applyLiveFix(action) {
+  const setCheck = (id, v) => { $(id).checked = v; $(id).dispatchEvent(new Event('change')); };
+  if (action.startsWith('micGain')) {
+    settings.micGainDb = Math.max(-20, Math.min(30, settings.micGainDb + +action.slice(7)));
+    $('opt-mic-gain').value = settings.micGainDb;
+    $('out-mic-gain').textContent = fmtDb(settings.micGainDb);
+    saveSettings();
+    sendDenoiseConfig();
+  } else if (action === 'denoiseOn') {
+    setCheck(mic ? 'opt-dn-mic' : 'opt-dn-int', true);
+  } else if (action === 'denoiseStronger') {
+    settings.dnStrength = Math.min(4, settings.dnStrength + 0.5);
+    $('opt-dn-strength').value = settings.dnStrength;
+    $('out-dn-strength').textContent = `${settings.dnStrength.toFixed(1)}×`;
+    saveSettings();
+    sendDenoiseConfig();
+  } else if (action === 'learnNoise') {
+    $('btn-learn').click();
+  } else if (action === 'hum50' || action === 'hum60') {
+    settings.hum = +action.slice(3);
+    $('opt-hum').value = String(settings.hum);
+    saveSettings();
+    sendDenoiseConfig();
+  } else if (action === 'highpassOn') {
+    setCheck('opt-hp', true);
+  } else if (action === 'browserNsOn') {
+    setCheck('opt-browser-ns', true);
+  }
+}
+
+const fmtDb = (v) => `${v > 0 ? '+' : ''}${v} dB`;
 
 // ------------------------------------------------------------------- log --
 
@@ -1025,8 +1292,9 @@ function fmtHz(f) {
   return `${+f.toFixed(f < 100 ? 1 : 0)} Hz`;
 }
 function fmtTime(s) {
-  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
-  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  const mmss = `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  return h ? `${h}:${mmss}` : mmss;
 }
 function fmtClock(s, sep) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60), ms = Math.round((s % 1) * 1000) % 1000;
@@ -1094,6 +1362,10 @@ function init() {
   bindSlider('opt-hold', 'holdMs', (v) => `${v} ms`, sendGuardConfig);
   bindSlider('opt-dn-strength', 'dnStrength', (v) => `${v.toFixed(1)}×`, sendDenoiseConfig);
   bindSlider('opt-dn-floor', 'dnFloorDb', (v) => `${v} dB`, sendDenoiseConfig);
+  bindSlider('opt-mic-gain', 'micGainDb', fmtDb, sendDenoiseConfig);
+  $('opt-hum').value = String(settings.hum);
+  $('opt-hum').addEventListener('change', () => { settings.hum = +$('opt-hum').value; saveSettings(); sendDenoiseConfig(); });
+  $('btn-soundcheck').addEventListener('click', runSoundCheck);
 
   $('btn-add-custom').addEventListener('click', () => {
     const freq = peak ? Math.round(peak) : 1000;
@@ -1145,6 +1417,17 @@ function init() {
     if (recorder || library.some((r) => r.unsaved)) { e.preventDefault(); e.returnValue = ''; }
   });
   recoverInterrupted().catch(() => {}).finally(() => refreshLibrary());
+  $('opt-wake').addEventListener('change', () => { if (!$('opt-wake').checked) releaseWake(); else if (recorder) keepAwake(); });
+  document.addEventListener('visibilitychange', () => { if (recorder && document.visibilityState === 'visible') keepAwake(); });
+
+  initEditor({
+    toast,
+    decode: (buf) => new OfflineAudioContext(1, 1, 48000).decodeAudioData(buf),
+    audioGraph: async () => { await ensureAudio(); return { ctx, nodes }; },
+    denoiseSettings: () => ({ strength: settings.dnStrength, floor: Math.pow(10, settings.dnFloorDb / 20) }),
+    saveStream,
+    saveOriginal,
+  });
 }
 
 init();

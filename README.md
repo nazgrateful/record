@@ -36,6 +36,35 @@ specific frequencies** when they show up in the audio.
 - **Separate screen and sound files**: record the screen with sound in one
   file, or the screen (no sound) and the sound as two separate files that
   start at the same moment, or just the sound, or just the screen.
+- **Long recordings (12 hours and more)**: recordings stream to storage every
+  second, the computer can be kept awake while recording, there's an optional
+  auto-stop timer, and the storage line shows roughly how many hours fit.
+  Saved recordings get their full length worked out so you can jump anywhere.
+- **Sound check** before recording: 3 s of quiet then 5 s of normal sound
+  through the same chain that gets recorded. It reports level, clipping,
+  background noise, mains hum, rumble, DC offset and stereo problems, with
+  tips and one-click fixes (mic volume, noise removal and learning, a live
+  50/60 Hz hum filter, low cut, browser noise suppression).
+- **Import & edit audio** (section 6): import WAV, MP3, M4A/AAC, OGG/Opus,
+  WebM, MP4 or MKV (audio is taken from video files), or press **Edit** on a
+  saved recording.
+  - See the **whole recording** in an overview strip; drag its box or click
+    to move, scroll with the wheel or scroll bar, zoom, jump to a time
+    (e.g. `2:15:30`), ±10 s, and the playhead follows playback.
+  - Select by dragging, then cut / copy / paste / delete / keep only
+    selection / silence, with undo and redo.
+  - Effects on the selection (or everything): fade in/out, normalize, change
+    volume, reverse, and noise removal (optionally learned from a selection).
+  - **Check audio health** finds clipping, quiet or loud audio, noise, hum,
+    rumble, DC offset, one-sided or out-of-phase stereo and silent ends, and
+    fixes them in one click.
+  - Works on 12-hour files: decoded sound is kept in the browser's storage in
+    blocks, never all in memory; it's still there after a reload.
+- **Convert / download in other formats**: MP3, M4A (AAC, where the browser
+  can encode it, e.g. Chrome on Windows/macOS), Opus in OGG or WebM, and
+  WAV 16-bit, 24-bit or 32-bit float. From the editor, or **Convert &
+  download** on any saved recording (its sound). The MP3 encoder and the
+  WebM/MP4 muxers are loaded from jsDelivr the first time they're used.
 - **Binaural-beat meter**: shows the difference between the left- and
   right-ear tones (how Robert Monroe's Hemi-Sync works), with its brainwave
   band and use.
@@ -82,6 +111,11 @@ microphone still works there.
 - `denoise-worklet.js`: FFT-based background noise removal.
 - `presets.js`: built-in frequency library, note helpers and brainwave bands.
 - `db.js`: saved-recordings library (IndexedDB) with crash recovery.
+- `editor.js`: the audio editor. `pcm.js`: block storage for long audio.
+- `decoders.js`: streaming import (WAV, WebM/MKV, Ogg, MP3, MP4/M4A).
+- `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
+- `health.js`: the audio health check and sound check suggestions.
+- `tap-worklet.js`: hands live audio to the sound check.
 
 Note: the uses listed for spiritual and Hemi-Sync frequencies are the
 traditional or popular claims attached to them, not scientifically established

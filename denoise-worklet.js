@@ -55,7 +55,7 @@ function fft(re, im, inverse) {
 }
 
 class DenoiseProcessor extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super();
     this.enabled = true;
     this.strength = 1.5;  // over-subtraction factor; higher removes more noise
@@ -79,19 +79,22 @@ class DenoiseProcessor extends AudioWorkletProcessor {
     this.gain = new Float32Array(BINS).fill(1);
     this.frames = 0;
 
-    this.port.onmessage = (e) => {
-      const d = e.data;
-      if ('enabled' in d) this.enabled = d.enabled;
-      if ('strength' in d) this.strength = d.strength;
-      if ('floor' in d) this.floor = d.floor;
-      if ('mode' in d) this.mode = d.mode;
-      if (d.learn) {
-        this.learnFrames = Math.round((d.learn * sampleRate) / HOP);
-        this.learnAcc.fill(0);
-        this.learnCount = 0;
-      }
-      if (d.forget) { this.learned = null; this.mode = 'auto'; }
-    };
+    this.port.onmessage = (e) => this.configure(e.data);
+    // Offline use (the audio editor) passes its settings up front.
+    if (options && options.processorOptions) this.configure(options.processorOptions);
+  }
+
+  configure(d) {
+    if ('enabled' in d) this.enabled = d.enabled;
+    if ('strength' in d) this.strength = d.strength;
+    if ('floor' in d) this.floor = d.floor;
+    if ('mode' in d) this.mode = d.mode;
+    if (d.learn) {
+      this.learnFrames = Math.round((d.learn * sampleRate) / HOP);
+      this.learnAcc.fill(0);
+      this.learnCount = 0;
+    }
+    if (d.forget) { this.learned = null; this.mode = 'auto'; }
   }
 
   processFrame(channels) {
