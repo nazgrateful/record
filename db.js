@@ -8,6 +8,19 @@ const DB_NAME = 'freq-recorder';
 const DB_VERSION = 3;
 let dbPromise = null;
 
+// RULES FOR UPDATES — saved recordings must survive every update:
+//  * Never delete, rename or clear an object store or index, never change a
+//    keyPath, never call indexedDB.deleteDatabase.
+//  * Only add things, in a new `if (e.oldVersion < N)` block, and bump
+//    DB_VERSION to N. Old records must keep working (treat new fields as
+//    optional when reading).
+//  * Run tests/upgrade-check.mjs before publishing.
+
+const listeners = new Set();
+// Messages for the page (e.g. "close other tabs to finish the update").
+export function onNotice(fn) { listeners.add(fn); }
+const notice = (msg) => listeners.forEach((fn) => fn(msg));
+
 function open() {
   if (!dbPromise) {
     dbPromise = new Promise((resolve, reject) => {
@@ -28,8 +41,28 @@ function open() {
           db.createObjectStore('pcmMeta');
         }
       };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+      // Another tab still has the old version open: the upgrade waits for it.
+      req.onblocked = () => notice('The site was updated. Close its other open tabs (or reload them) to finish — your recordings are safe.');
+      req.onsuccess = () => {
+        const db = req.result;
+        notice(null);
+        // A newer version of the site was opened in another tab: step aside
+        // so it can upgrade, and ask for a reload.
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+          notice('The site was updated in another tab. Reload this page to keep using it — your recordings are safe.');
+        };
+        db.onclose = () => { dbPromise = null; };
+        resolve(db);
+      };
+      req.onerror = () => {
+        dbPromise = null;
+        const err = req.error;
+        // Stored data is from a newer version than this (cached) page.
+        if (err && err.name === 'VersionError') notice('This page is out of date. Reload it (Ctrl/⌘+Shift+R) to see your recordings — nothing was lost.');
+        reject(err);
+      };
     });
   }
   return dbPromise;
@@ -67,6 +100,17 @@ export async function updateRecording(id, patch) {
 
 export async function putChunk(recId, seq, blob) {
   await tx(['chunks'], 'readwrite', (t) => { t.objectStore('chunks').put({ recId, seq, blob }); });
+}
+
+// Everything about every recording, for backups (chunks are read separately).
+export async function getChunkCount(recId) {
+  const db = await open();
+  return done(db.transaction('chunks').objectStore('chunks').index('recId').count(IDBKeyRange.only(recId)));
+}
+
+export async function hasRecording(id) {
+  const db = await open();
+  return !!(await done(db.transaction('recordings').objectStore('recordings').getKey(id)));
 }
 
 export async function listRecordings() {

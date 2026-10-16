@@ -218,10 +218,14 @@ export async function restoreDoc() {
   const unused = [...doc.meta.keys()].filter((k) => !used.has(k));
   unused.forEach((k) => doc.meta.delete(k));
   store.deleteBlockKeys(unused).catch(() => {});
-  if (doc.segs.some((s) => s.key && !doc.meta.has(s.key))) {
-    await discardDoc(doc);
-    return null;
-  }
+  // Never throw the audio away: if a block went missing, keep everything
+  // else and put silence where it was.
+  doc.missing = 0;
+  doc.segs = doc.segs.map((s) => {
+    if (!s.key || doc.meta.has(s.key)) return s;
+    doc.missing += segLen(s);
+    return silence(segLen(s));
+  });
   return doc;
 }
 

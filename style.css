@@ -135,6 +135,9 @@ select { min-width: 0; }
 .convert { display: inline-flex; gap: 6px; align-items: center; }
 .convert select { max-width: 190px; padding: 3px 6px; font-size: 13px; }
 
+#notice { max-width: 1068px; margin: 8px auto 0; padding: 10px 14px; border-radius: 10px; background: #fff4d6; color: #5c4400; border: 1px solid #e8c25a; }
+.warn-text { color: var(--rec); }
+
 #toast {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
   background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px;

@@ -661,6 +661,11 @@ async function startRecording() {
   r.limit = (+$('opt-stop-h').value || 0) * 3600 + (+$('opt-stop-m').value || 0) * 60;
   recorder = r;
   keepAwake();
+  // Mark these recordings as in progress, so another tab of the site never
+  // treats them as interrupted.
+  for (const part of r.parts) {
+    if (navigator.locks) navigator.locks.request(lockName(part.rec.id), () => new Promise((res) => { part.unlock = res; })).catch(() => {});
+  }
   const stopped = [];
   for (const part of r.parts) {
     const { mr, rec } = part;
@@ -773,6 +778,7 @@ async function finishRecording(r) {
 
   const cues = buildCues(r.startedAt, r.stoppedAt);
   const results = await Promise.all(r.parts.map((part) => finishPart(r, part, cues)));
+  r.parts.forEach((part) => part.unlock && part.unlock());
   const site = results.every((x) => x.savedToSite);
   const disk = results.some((x) => x.savedToDisk);
 
@@ -785,6 +791,9 @@ async function finishRecording(r) {
       await w.close();
     } catch {}
   }
+
+  // Keep the folder restorable: list the new files in its backup index.
+  if (disk) await addToManifest(r.folder, r.parts.filter((p) => p.rec.savedToDisk).map((p) => p.rec)).catch(() => {});
 
   const unsaved = r.parts.filter((p) => p.rec.unsaved).map((p) => p.rec);
   await refreshLibrary(unsaved);
@@ -824,26 +833,48 @@ function toSrt(cues) {
 }
 
 // Recordings left incomplete by a crash or closed tab: keep what was saved.
+const lockName = (id) => `freq-recorder:recording:${id}`;
+
+// Runs fn only if no tab is still recording `id` (via the Web Locks API).
+// Without that API, recordings younger than a day are left alone.
+async function ifNotRecording(rec, fn) {
+  if (navigator.locks) return navigator.locks.request(lockName(rec.id), { ifAvailable: true }, (lock) => (lock ? fn() : null));
+  if (Date.now() - rec.createdAt > 86400000) return fn();
+}
+
 async function recoverInterrupted() {
   for (const rec of await store.listRecordings()) {
     if (rec.complete) continue;
-    const rows = await store.getChunkRows(rec.id);
-    if (!rows.length) {
-      await store.deleteRecording(rec.id);
-      continue;
-    }
-    const size = rows.reduce((n, c) => n + c.blob.size, 0);
-    await store.updateRecording(rec.id, { complete: true, recovered: true, size, seconds: Math.max(rec.seconds, rows.length) });
-    toast(`Recovered "${rec.name}" from an interrupted session.`, 7000);
+    await ifNotRecording(rec, () => recoverOne(rec));
   }
+}
+
+async function recoverOne(rec) {
+  // A restore from backup that was cut short: drop the partial copy (the
+  // backup folder still has the file), so restoring again redoes it.
+  if (rec.restoring) {
+    await store.deleteRecording(rec.id);
+    return;
+  }
+  const rows = await store.getChunkRows(rec.id);
+  if (!rows.length) {
+    // Nothing was ever saved for it (it stopped within its first second).
+    await store.deleteRecording(rec.id);
+    return;
+  }
+  const size = rows.reduce((n, c) => n + c.blob.size, 0);
+  await store.updateRecording(rec.id, { complete: true, recovered: true, size, seconds: Math.max(rec.seconds, rows.length) });
+  toast(`Recovered "${rec.name}" from an interrupted session.`, 7000);
 }
 
 async function refreshLibrary(extra = []) {
   const unsaved = library.filter((r) => r.unsaved);
   try {
     library = [...extra, ...unsaved, ...(await store.listRecordings())].filter((r, i, a) => a.findIndex((x) => x.id === r.id) === i);
+    libraryError = null;
   } catch (err) {
     library = [...extra, ...unsaved];
+    libraryError = err;
   }
   await renderRecordings();
   renderStorageInfo();
@@ -864,8 +895,15 @@ async function urlsFor(rec) {
   return u;
 }
 
+let libraryError = null;
+
 async function renderRecordings() {
   const box = $('recordings');
+  if (libraryError && !library.length) {
+    box.innerHTML = '<p class="warn-text"></p>';
+    box.firstChild.textContent = `Your saved recordings couldn't be loaded right now (${libraryError.message || libraryError.name}). They have not been deleted — reload the page, and close other tabs of this site if it keeps happening.`;
+    return;
+  }
   if (!library.length) {
     box.innerHTML = '<p class="muted">Nothing recorded yet.</p>';
     return;
@@ -908,7 +946,7 @@ async function renderRecordings() {
       ? '⚠ Not saved on the website (storage failed) — download it before closing this tab.'
       : rec.recovered
         ? '✓ Saved on this website · recovered after an interruption'
-        : rec.imported ? '✓ Imported' : '✓ Saved on this website') + (rec.savedToDisk ? ' · ✓ saved to your folder' : '');
+        : rec.restored ? '✓ Restored from a backup' : rec.imported ? '✓ Imported' : '✓ Saved on this website') + (rec.savedToDisk ? ' · ✓ saved to your folder' : '');
     const fmtSel = info.querySelector('[data-fmt]');
     fillFormats(fmtSel);
     info.querySelector('[data-convert]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target));
@@ -1028,6 +1066,141 @@ async function saveOriginal(file) {
   for (let i = 0, seq = 0; i < file.size; i += STEP) await store.putChunk(rec.id, seq++, file.slice(i, i + STEP));
   await store.updateRecording(rec.id, { complete: true });
   await refreshLibrary();
+}
+
+// ------------------------------------------------------------- backups --
+//
+// A backup folder holds each recording as a normal file plus
+// recordings-backup.json (the details needed to put them back). Backing up
+// again only copies what's new; restoring only adds what's missing, so
+// nothing on the site is ever overwritten or removed.
+
+const MANIFEST = 'recordings-backup.json';
+const META_KEYS = ['id', 'name', 'ext', 'mime', 'audioOnly', 'kind', 'group', 'createdAt', 'seconds', 'size', 'cues', 'recovered', 'imported'];
+
+async function readManifest(folder) {
+  try {
+    const text = await (await (await folder.getFileHandle(MANIFEST)).getFile()).text();
+    const m = JSON.parse(text);
+    if (m && Array.isArray(m.recordings)) return m;
+  } catch {}
+  return { app: 'freq-recorder', version: 1, recordings: [] };
+}
+
+async function writeManifest(folder, m) {
+  m.updatedAt = new Date().toISOString();
+  m.namedFrequencies = settings.targets;
+  const w = await (await folder.getFileHandle(MANIFEST, { create: true })).createWritable();
+  await w.write(JSON.stringify(m, null, 1));
+  await w.close();
+}
+
+const entryFor = (rec, file) => ({ ...Object.fromEntries(META_KEYS.filter((k) => k in rec).map((k) => [k, rec[k]])), file });
+
+async function addToManifest(folder, recs) {
+  if (!recs.length) return;
+  const m = await readManifest(folder);
+  for (const rec of recs) {
+    if (!m.recordings.some((e) => e.id === rec.id)) m.recordings.push(entryFor(rec, `${rec.name}.${rec.ext}`));
+  }
+  await writeManifest(folder, m);
+}
+
+async function pickBackupFolder() {
+  try {
+    return await window.showDirectoryPicker({ id: 'backup', mode: 'readwrite', startIn: 'documents' });
+  } catch (err) {
+    if (err.name !== 'AbortError') toast('Could not open that folder: ' + err.message, 6000);
+    return null;
+  }
+}
+
+async function backupAll() {
+  const btn = $('btn-backup');
+  btn.disabled = true;
+  const folder = await pickBackupFolder();
+  if (!folder) { btn.disabled = false; return; }
+  let copied = 0, kept = 0, failed = 0;
+  try {
+    const m = await readManifest(folder);
+    const recs = library.filter((r) => r.complete || r.unsaved);
+    for (let i = 0; i < recs.length; i++) {
+      const rec = recs[i];
+      btn.textContent = `Backing up ${i + 1} / ${recs.length}…`;
+      let entry = m.recordings.find((e) => e.id === rec.id);
+      let file = entry ? entry.file : `${rec.name}.${rec.ext}`;
+      try {
+        // Already there with the right size: nothing to copy.
+        const existing = await folder.getFileHandle(file).then((h) => h.getFile()).catch(() => null);
+        if (existing && existing.size === rec.size && entry) { kept++; continue; }
+        if (existing && !entry) file = `${rec.name}-${rec.id}.${rec.ext}`; // a different file has that name
+        const blob = rec.memoryBlob || (await store.getBlob(rec));
+        const w = await (await folder.getFileHandle(file, { create: true })).createWritable();
+        await w.write(blob);
+        await w.close();
+        if (Array.isArray(rec.cues) && rec.cues.length) {
+          const vw = await (await folder.getFileHandle(file.replace(/\.[^.]+$/, '.vtt'), { create: true })).createWritable();
+          await vw.write(toVtt(rec.cues));
+          await vw.close();
+        }
+        m.recordings = m.recordings.filter((e) => e.id !== rec.id).concat(entryFor({ ...rec, size: blob.size }, file));
+        copied++;
+      } catch (err) {
+        failed++;
+        console.error('Backup failed for', rec.name, err);
+      }
+    }
+    await writeManifest(folder, m);
+    toast(`Backup in "${folder.name}": ${copied} copied, ${kept} already there` + (failed ? `, ${failed} failed` : '') + '.', 7000);
+  } catch (err) {
+    toast('Backup failed: ' + err.message, 8000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Back up everything to a folder…';
+  }
+}
+
+async function restoreBackup() {
+  const btn = $('btn-restore');
+  btn.disabled = true;
+  const folder = await pickBackupFolder();
+  if (!folder) { btn.disabled = false; return; }
+  let added = 0, had = 0, missing = 0;
+  try {
+    const m = await readManifest(folder);
+    if (!m.recordings.length) {
+      toast(`No backup found in "${folder.name}" (it needs a ${MANIFEST} file).`, 7000);
+      return;
+    }
+    for (let i = 0; i < m.recordings.length; i++) {
+      const e = m.recordings[i];
+      btn.textContent = `Restoring ${i + 1} / ${m.recordings.length}…`;
+      if (!e.id || (await store.hasRecording(e.id))) { had++; continue; }
+      const file = await folder.getFileHandle(e.file).then((h) => h.getFile()).catch(() => null);
+      if (!file) { missing++; continue; }
+      const rec = { ...e, size: file.size, complete: false, restored: true, restoring: true };
+      delete rec.file;
+      await store.putRecording(rec);
+      const STEP = 8 << 20;
+      for (let o = 0, seq = 0; o < file.size; o += STEP) await store.putChunk(rec.id, seq++, file.slice(o, o + STEP));
+      await store.updateRecording(rec.id, { complete: true, restoring: false });
+      added++;
+    }
+    // Named frequencies from the backup that aren't in the list yet.
+    if (Array.isArray(m.namedFrequencies)) {
+      for (const t of m.namedFrequencies) {
+        if (t && t.freq > 0 && !settings.targets.some((x) => x.name === t.name && Math.abs(x.freq - t.freq) < 0.01)) settings.targets.push({ ...t, id: uid() });
+      }
+      targetsChanged();
+    }
+    await refreshLibrary();
+    toast(`Restored ${added} recording${added === 1 ? '' : 's'}` + (had ? `, ${had} already here` : '') + (missing ? `, ${missing} file${missing === 1 ? '' : 's'} missing from the folder` : '') + '.', 7000);
+  } catch (err) {
+    toast('Restore failed: ' + err.message, 8000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Restore from a backup folder…';
+  }
 }
 
 async function renderStorageInfo() {
@@ -1416,7 +1589,16 @@ function init() {
   window.addEventListener('beforeunload', (e) => {
     if (recorder || library.some((r) => r.unsaved)) { e.preventDefault(); e.returnValue = ''; }
   });
+  store.onNotice((msg) => { $('notice').textContent = msg || ''; $('notice').hidden = !msg; });
+  // Ask the browser to never clear this site's storage on its own.
+  store.requestPersistence().catch(() => {}).finally(renderStorageInfo);
   recoverInterrupted().catch(() => {}).finally(() => refreshLibrary());
+  $('btn-backup').addEventListener('click', backupAll);
+  $('btn-restore').addEventListener('click', restoreBackup);
+  if (!window.showDirectoryPicker) {
+    $('btn-backup').disabled = $('btn-restore').disabled = true;
+    $('backup-hint').textContent = 'Backing up to a folder needs Chrome or Edge. In this browser, use the Download button on each recording to keep copies.';
+  }
   $('opt-wake').addEventListener('change', () => { if (!$('opt-wake').checked) releaseWake(); else if (recorder) keepAwake(); });
   document.addEventListener('visibilitychange', () => { if (recorder && document.visibilityState === 'visible') keepAwake(); });
 

@@ -77,6 +77,26 @@ specific frequencies** when they show up in the audio.
 - Live spectrum and the loudest frequency right now, with its note name.
 - "Play test tones" lets you try everything without sharing anything.
 
+## Your recordings are kept across updates
+
+Recordings, settings and audio open in the editor live in your browser's
+storage for this site, and updates to the site never remove them:
+
+- Storage changes between versions only ever add things; each update is
+  checked against data saved by every earlier version (`npm run test:upgrade`).
+- If a tab with the old version is still open, the new one asks you to close
+  it instead of showing an empty list, and finishes updating once it's closed.
+- Opening the site in another tab never touches a recording in progress.
+- The site asks the browser to never clear its storage automatically.
+- **Back up everything to a folder** (Chrome/Edge) copies every recording
+  to a folder of your choice with an index file; doing it again only copies
+  new ones. **Restore from a backup folder** puts back anything missing (for
+  example after clearing browser data or on a new computer). The auto-save
+  folder can be restored from the same way.
+
+Storage belongs to the site's address: keep using the same address (for
+example the same GitHub Pages URL), or back up and restore when it changes.
+
 ## Running it
 
 The page must be served over `http://localhost` or `https://` (browsers block
@@ -116,6 +136,7 @@ microphone still works there.
 - `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
 - `health.js`: the audio health check and sound check suggestions.
 - `tap-worklet.js`: hands live audio to the sound check.
+- `tests/upgrade-check.mjs`: checks updates keep all saved data (`npm run test:upgrade`).
 
 Note: the uses listed for spiritual and Hemi-Sync frequencies are the
 traditional or popular claims attached to them, not scientifically established

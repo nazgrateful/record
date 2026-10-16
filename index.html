@@ -12,6 +12,7 @@
     <p class="sub">Record your screen with its internal audio and/or your microphone, with background noise removed. When a frequency you've named shows up in the audio, the app names it on screen, logs the time, and can mute it.</p>
   </header>
 
+  <div id="notice" role="status" hidden></div>
   <main>
     <section class="card" id="capture-card">
       <h2>1. Capture</h2>
@@ -190,6 +191,11 @@
       <h2>5. Saved recordings</h2>
       <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. They're also downloaded automatically when you stop (if that's turned on), and can be written straight into a folder you choose, such as your Desktop. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
       <p class="hint" id="storage-info"></p>
+      <div class="row">
+        <button id="btn-backup">Back up everything to a folder…</button>
+        <button id="btn-restore">Restore from a backup folder…</button>
+      </div>
+      <p class="hint" id="backup-hint">Updates to this website never remove your recordings. A backup folder also protects them if the browser's data gets cleared or you switch computers: backing up again only copies new recordings, and restoring only adds missing ones.</p>
       <div id="recordings"><p class="muted">Nothing recorded yet.</p></div>
     </section>
 

@@ -97,7 +97,12 @@ export function initEditor(d) {
 
   // Pick up where we left off: imported audio stays in the browser's storage.
   pcm.restoreDoc().then((d) => {
-    if (d) { show(d); deps.toast(`Reopened "${d.name}" in the editor.`); }
+    if (d) {
+      show(d);
+      deps.toast(d.missing
+        ? `Reopened "${d.name}", but ${fmt(d.missing / d.rate)} of it was missing from storage and is now silent.`
+        : `Reopened "${d.name}" in the editor.`, d.missing ? 9000 : 3500);
+    }
   }).catch(() => {});
 }
 
