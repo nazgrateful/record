@@ -1511,6 +1511,13 @@ async function streetPiece(r, pos, n, mode) {
   });
 }
 
+// The sound open in the editor, for the video editor to use as a video's sound.
+export function editorAudio() {
+  if (!doc) return null;
+  const d = doc;
+  return { name: d.name, rate: d.rate, ch: d.ch, total, read: (pos, n) => pcm.readRange(d, pos, n) };
+}
+
 // Exposed for automated tests.
 export const editorState = {
   get doc() { return doc; }, get total() { return total; }, get busy() { return busy; }, get playing() { return !!playing; },

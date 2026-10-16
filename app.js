@@ -1,6 +1,7 @@
 import { PRESET_LIBRARY, NOTE_NAMES, noteToFreq, freqToNote, beatBand } from './presets.js';
 import * as store from './db.js';
-import { initEditor, openFile as openInEditor, openForTones, fillFormats, renderHealthList } from './editor.js';
+import { initEditor, openFile as openInEditor, openForTones, fillFormats, renderHealthList, editorAudio } from './editor.js';
+import { initVideoEditor, openVideo } from './videoedit.js';
 import { Stats, liveSuggestions } from './health.js';
 import { playTone } from './tone-player.js';
 import { encode, fileSource, formatById, downloadParts } from './export.js';
@@ -28,6 +29,7 @@ const defaults = {
   screenFps: 30,
   screenSound: true,       // computer sound
   screenMic: false,        // also the microphone
+  audioSource: 'mic',      // Record audio: 'mic' (external) | 'internal' | 'both'
   autoDownload: true,
   saveFolder: false,
 };
@@ -173,14 +175,14 @@ function applyMonitor() {
 function recordScreen() {
   screenProblem(null);
   if (recorder) return toast('Already recording: press ■ Stop first.');
-  const stream = requestScreen(settings.screenSound);
+  const stream = requestScreen(true);
   if (!stream) return;
   (async () => {
-    await startScreen({ stream, audio: settings.screenSound });
+    await startScreen({ stream, audio: true });
     if (!display) return; // cancelled or blocked (explained under the button)
-    // Computer sound wanted but the share came without it: use a loopback
-    // device if there is one, otherwise ask before recording without it.
-    if (settings.screenSound && !display.source) {
+    // Screen recordings always want the computer's sound: if the share came
+    // without it, use a loopback device, otherwise ask before going on.
+    if (!display.source) {
       const dev = await findLoopbackDevice();
       if (dev && (await startLoopback(dev))) {
         toast(`Recording the computer's sound from "${dev.label}".`, 6000);
@@ -200,6 +202,7 @@ async function beginScreenRecording() {
   if (micForScreen) await startMic();
   if (!settings.screenMic && mic) stopMic();
   if ($('opt-mode').value === 'audio') { $('opt-mode').value = 'combined'; settings.mode = 'combined'; saveSettings(); }
+  settings.screenSound = true; // screen recordings always include the computer's sound
   // The auto-save folder: only if the browser still allows it without asking
   // (asking would need another click); otherwise it's saved on the site.
   const folder = await folderIfAllowed();
@@ -209,6 +212,54 @@ async function beginScreenRecording() {
     const s = display.stream.getVideoTracks()[0].getSettings();
     const sound = display.source ? ' with computer sound' : display.loopback ? ` with computer sound (${display.loopback.label})` : '';
     toast(`Recording your screen${sound}${s.width ? ` (${s.width}×${s.height}, ${Math.round(s.frameRate || settings.screenFps)} fps)` : ''}. Press ■ Stop or "Stop sharing" to finish.`, 6000);
+    $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+// --------------------------------------------------------- record audio --
+
+// Sound only, from the microphone (external), the computer (internal), or both.
+function recordAudio() {
+  screenProblem(null, 'audio-error');
+  if (recorder) return toast('Already recording: press ■ Stop first.');
+  const src = settings.audioSource;
+  const wantInternal = src === 'internal' || src === 'both';
+  const wantMic = src === 'mic' || src === 'both';
+  // Computer sound comes through the browser's share window, which must open
+  // straight from the click.
+  const stream = wantInternal ? requestScreen(true, 'audio-error') : null;
+  if (wantInternal && !stream) return;
+  (async () => {
+    if (stopTones) stopTones();
+    if (wantInternal) {
+      await startScreen({ stream, audio: true, errorEl: 'audio-error' });
+      if (!display) return;
+      if (!display.source) {
+        const dev = await findLoopbackDevice();
+        if (!(dev && (await startLoopback(dev)))) {
+          noComputerSound({ el: 'audio-error', allowWithout: wantMic, onAgain: () => { stopScreen(); recordAudio(); }, onWithout: () => beginAudioRecording(wantMic, true) });
+          return;
+        }
+      }
+    } else stopScreen();
+    await beginAudioRecording(wantMic, wantInternal);
+  })().catch((err) => screenProblem(err, 'audio-error'));
+}
+
+async function beginAudioRecording(wantMic, viaShare) {
+  screenProblem(null, 'audio-error');
+  const micStarted = wantMic && !mic;
+  if (micStarted) await startMic();
+  if (!wantMic && mic) stopMic();
+  if (!mic && !(display && (display.source || display.loopback))) return toast('There is no sound to record.', 5000);
+  $('opt-mode').value = 'audio';
+  const folder = await folderIfAllowed();
+  await startRecording({ folder, mode: 'audio' });
+  if (recorder) {
+    recorder.micForScreen = micStarted;
+    recorder.releaseDisplay = viaShare; // the share was only for its sound
+    const what = [mic && 'microphone', display && (display.source || display.loopback) && 'computer sound'].filter(Boolean).join(' + ');
+    toast(`Recording sound (${what}). Press ■ Stop to finish.`, 6000);
     $('preview-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 }
@@ -257,7 +308,7 @@ async function startLoopback(dev) {
 
 // No computer sound came with the share: explain how to get it on this
 // system, and let the person choose.
-function noComputerSound() {
+function noComputerSound({ el: elId = 'screen-error', allowWithout = true, onAgain, onWithout } = {}) {
   const p = platform();
   const tips = {
     win: 'In the share window, choose <b>Entire screen</b> and turn on <b>Also share system audio</b> (bottom left), or pick a <b>tab</b> with <b>Also share tab audio</b> on.',
@@ -267,36 +318,37 @@ function noComputerSound() {
     other: 'Choose a screen or tab and turn on the <b>share audio</b> switch in the share window.',
   }[p];
   const browserNote = chromium() ? '' : ' <b>This browser can\'t share computer sound at all</b> — use Chrome or Edge for that.';
-  const el = $('screen-error');
+  const el = $(elId);
   el.innerHTML = `⚠ <b>No computer sound was shared</b>, so it wouldn't be in the recording. ${tips}${browserNote}
-    <span class="row"><button class="small primary" data-again>Share again with sound</button><button class="small" data-anyway>Record without computer sound</button></span>`;
+    <span class="row"><button class="small primary" data-again>Share again with sound</button>${allowWithout ? '<button class="small" data-anyway>Record without computer sound</button>' : ''}</span>`;
   el.hidden = false;
-  el.querySelector('[data-again]').onclick = () => { stopScreen(); recordScreen(); };
-  el.querySelector('[data-anyway]').onclick = () => { beginScreenRecording().catch(screenProblem); };
+  el.querySelector('[data-again]').onclick = onAgain || (() => { stopScreen(); recordScreen(); });
+  const anyway = el.querySelector('[data-anyway]');
+  if (anyway) anyway.onclick = onWithout || (() => { beginScreenRecording().catch((e) => screenProblem(e)); });
 }
 
 // Opens the browser's screen picker (must be called straight from a click).
 // Returns the pending stream, or null with the reason shown.
-function requestScreen(wantAudio) {
+function requestScreen(wantAudio, elId) {
   if (!window.isSecureContext) {
-    screenProblem({ name: 'Insecure' });
+    screenProblem({ name: 'Insecure' }, elId);
     return null;
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    screenProblem({ name: 'Unsupported' });
+    screenProblem({ name: 'Unsupported' }, elId);
     return null;
   }
   try {
     return navigator.mediaDevices.getDisplayMedia(displayOptions(wantAudio));
   } catch (err) {
-    screenProblem(err);
+    screenProblem(err, elId);
     return null;
   }
 }
 
 // Explains, under the Record my screen button, why recording couldn't start.
-function screenProblem(err) {
-  const el = $('screen-error');
+function screenProblem(err, elId = 'screen-error') {
+  const el = $(elId);
   if (!err) { el.hidden = true; return; }
   const msg = String(err.message || '');
   const mac = /Mac/.test(navigator.platform || navigator.userAgent);
@@ -359,7 +411,7 @@ async function startScreen(opts = {}) {
   try {
     const wantAudio = opts.audio ?? true;
     // The picker must be opened straight from the click, before anything else.
-    const pending = opts.stream || requestScreen(wantAudio);
+    const pending = opts.stream || requestScreen(wantAudio, opts.errorEl);
     if (!pending) return;
     const stream = await pending;
     await ensureAudio();
@@ -393,7 +445,7 @@ async function startScreen(opts = {}) {
       stopScreen();
     });
   } catch (err) {
-    screenProblem(err);
+    screenProblem(err, opts.errorEl);
   }
   updateSources();
 }
@@ -817,7 +869,7 @@ async function folderForRecording() {
 
 async function startRecording(opts = {}) {
   if (!nodes || recorder) return;
-  const mode = $('opt-mode').value;
+  const mode = opts.mode || $('opt-mode').value;
   const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
   const baseName = `recording-${stamp}`;
   const folder = 'folder' in opts ? opts.folder : await folderForRecording();
@@ -988,12 +1040,12 @@ async function finishRecording(r) {
   // Stopping a screen recording also stops sharing the screen: the site no
   // longer sees it (the browser's "sharing" indicator goes away), and the
   // preview is cleared. A microphone turned on just for it goes off too.
-  if (r.screen) {
+  if (r.screen || r.releaseDisplay) {
     stopScreen();
     if (r.micForScreen) stopMic();
     pctx.fillStyle = '#0d0f13';
     pctx.fillRect(0, 0, preview.width, preview.height);
-  }
+  } else if (r.micForScreen) stopMic();
   $('rec-badge').hidden = true;
   $('btn-stop').disabled = true;
   for (const id of RECORD_LOCKED) $(id).disabled = /folder/.test(id) && !window.showDirectoryPicker;
@@ -1187,7 +1239,9 @@ async function renderRecordings() {
         <a download="${rec.name}.vtt" href="${u.vtt}">Subtitles (.vtt)</a>
         <a download="${rec.name}.srt" href="${u.srt}">Subtitles (.srt)</a>
         <span class="convert"><select data-fmt aria-label="Convert to"></select><button class="small" data-convert>Convert &amp; download</button><button class="small" data-save-conv title="Keep the converted copy in Saved recordings">Save converted copy</button></span>
-        <button class="small" data-edit>Edit</button>
+        <button class="small" data-rename>Rename</button>
+        ${rec.audioOnly ? '' : '<button class="small primary" data-edit-video>Edit video</button>'}
+        <button class="small" data-edit>${rec.audioOnly ? 'Edit' : 'Edit sound'}</button>
         <button class="small" data-tones>Add frequencies</button>
         <button class="small" data-del>Delete</button>
       </div>`;
@@ -1202,6 +1256,11 @@ async function renderRecordings() {
     fillFormats(fmtSel, { video: !rec.audioOnly && rec.ext === 'webm' });
     info.querySelector('[data-convert]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target));
     info.querySelector('[data-save-conv]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target, { save: true }));
+    info.querySelector('[data-rename]').addEventListener('click', () => renameRecording(rec));
+    const ev = info.querySelector('[data-edit-video]');
+    if (ev) ev.addEventListener('click', async () => {
+      try { openVideo(rec.memoryBlob || (await store.getBlob(rec)), rec.name); } catch (err) { toast('Could not open it: ' + err.message, 6000); }
+    });
     info.querySelector('[data-tones]').addEventListener('click', async () => {
       try {
         openForTones(rec.memoryBlob || (await store.getBlob(rec)), rec.name);
@@ -1342,6 +1401,23 @@ async function addFiles(files) {
     try { await saveOriginal(file); added++; } catch (err) { toast(`Couldn't add "${file.name}": ${err.message}`, 7000); }
   }
   if (added) toast(`Added ${added} file${added === 1 ? '' : 's'} to Saved recordings.`);
+}
+
+// Renames a saved recording (the name it's shown and downloaded with).
+async function renameRecording(rec) {
+  const next = prompt('New name for this recording:', rec.name);
+  if (next === null) return;
+  const clean = next.trim().replace(/[\\/:*?"<>|]+/g, '-').slice(0, 120);
+  if (!clean || clean === rec.name) return;
+  rec.name = clean;
+  if (!rec.unsaved) {
+    try { await store.updateRecording(rec.id, { name: clean }); } catch (err) { return toast('Renaming failed: ' + err.message, 6000); }
+  }
+  const old = mediaUrls.get(rec.id);
+  if (old) Object.values(old).forEach((x) => URL.revokeObjectURL(x));
+  mediaUrls.delete(rec.id);
+  await refreshLibrary();
+  toast(`Renamed to "${clean}.${rec.ext}".`);
 }
 
 // Adds an imported file, unchanged, to Saved recordings.
@@ -1806,7 +1882,12 @@ function init() {
     $(id).value = String(settings[key]);
     $(id).addEventListener('change', () => { settings[key] = conv($(id).value); saveSettings(); });
   }
-  for (const [id, key] of [['opt-sc-sound', 'screenSound'], ['opt-sc-mic', 'screenMic']]) {
+  $('btn-audio-rec').addEventListener('click', recordAudio);
+  for (const r of document.querySelectorAll('input[name=audio-src]')) {
+    r.checked = r.value === settings.audioSource;
+    r.addEventListener('change', () => { if (r.checked) { settings.audioSource = r.value; saveSettings(); } });
+  }
+  for (const [id, key] of [['opt-sc-mic', 'screenMic']]) {
     $(id).checked = !!settings[key];
     $(id).addEventListener('change', () => { settings[key] = $(id).checked; saveSettings(); });
   }
@@ -1928,6 +2009,7 @@ function init() {
     settings,
     saveSettings,
   });
+  initVideoEditor({ toast, saveStream, editorAudio, editSound: (b, n) => openInEditor(b, n) });
 }
 
 init();
