@@ -241,6 +241,12 @@
           <label><input type="checkbox" id="ed-loop"> Loop</label>
           <label><input type="checkbox" id="ed-follow" checked> Follow playhead</label>
           <label><input type="checkbox" id="ed-detect" checked> Detect named frequencies while playing</label>
+          <label>Listen at
+            <select id="ed-rate" title="Only changes how fast you hear it, not the audio">
+              <option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+            </select>
+          </label>
         </div>
         <div class="row">
           <span class="label">View</span>
@@ -271,21 +277,73 @@
           <button id="ed-reverse" class="small">Reverse</button>
         </div>
         <div class="row">
+          <span class="label">Speed</span>
+          <span class="muted">Slower:</span>
+          <button class="small" data-speed="0.5">0.5×</button>
+          <button class="small" data-speed="0.75">0.75×</button>
+          <button class="small" data-speed="0.9">0.9×</button>
+          <span class="muted">Faster:</span>
+          <button class="small" data-speed="1.1">1.1×</button>
+          <button class="small" data-speed="1.25">1.25×</button>
+          <button class="small" data-speed="1.5">1.5×</button>
+          <button class="small" data-speed="2">2×</button>
+          <label>or <input type="number" id="ed-speed" value="80" min="25" max="400" step="1" class="num"> %</label>
+          <button id="ed-speed-apply" class="small">Apply</button>
+          <label title="On: voices stay natural (time-stretch). Off: like a tape played faster/slower, the pitch goes up/down too."><input type="checkbox" id="ed-keep-pitch" checked> Keep pitch</label>
+        </div>
+        <div class="row">
           <span class="label">Noise</span>
           <button id="ed-learn-noise" class="small">Learn noise from selection</button>
           <button id="ed-denoise" class="small">Remove noise</button>
           <span id="ed-noise-status" class="muted"></span>
           <span class="muted">(uses the strength settings in "Background noise removal")</span>
         </div>
+        <details id="ed-street" class="tones">
+          <summary><span class="label">Street noise</span> Find street noises (horns, sirens, traffic, bangs) and remove them</summary>
+          <div class="row">
+            <button id="ed-street-find" class="primary">Find street noises</button>
+            <label>Sensitivity
+              <select id="ed-street-sens">
+                <option value="0">Low (only obvious ones)</option>
+                <option value="1" selected>Normal</option>
+                <option value="2">High (find more)</option>
+              </select>
+            </label>
+            <span id="ed-street-summary" class="muted"></span>
+          </div>
+          <div id="ed-street-list" class="street-list"></div>
+          <div class="row" id="ed-street-actions" hidden>
+            <button class="small" id="ed-street-all">Tick all</button>
+            <button class="small" id="ed-street-none">Untick all</button>
+            <label>How
+              <select id="ed-street-action">
+                <option value="cut">Cut out (the audio gets shorter)</option>
+                <option value="filter">Filter out (keeps voices where it can)</option>
+                <option value="duck">Turn down 20 dB</option>
+                <option value="silence">Silence</option>
+              </select>
+            </label>
+            <button id="ed-street-apply" class="primary">Remove ticked</button>
+          </div>
+          <p class="hint">Listen to each one (▶) and untick anything that isn't street noise before removing. Found noises are marked in colour on the waveform. "Filter out" removes engine rumble and horn/squeal tones but keeps other sound; sirens and bangs are turned down instead. Music with held notes can be mistaken for horns or sirens. Undo brings everything back.</p>
+        </details>
         <details id="ed-tones" class="tones">
           <summary><span class="label">Frequencies</span> Add frequencies (tones, binaural beats) or remove one</summary>
+          <p id="ed-tones-target" class="tones-target"></p>
           <div class="row">
+            <label>New ones go to
+              <select id="ed-tones-ears">
+                <option value="both">both ears</option>
+                <option value="left">the left ear</option>
+                <option value="right">the right ear</option>
+              </select>
+            </label>
             <select id="ed-tones-add" aria-label="Add a frequency"></select>
             <button id="ed-tones-preview" class="small">▶ Preview (6 s)</button>
           </div>
           <div class="tones-table">
             <table>
-              <thead><tr><th>Name</th><th>Hz (left / both ears)</th><th title="Optional: a different frequency in the right ear makes a binaural beat (use headphones)">Right ear Hz</th><th>Wave</th><th>Volume dB</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>Ears</th><th>Frequency</th><th>Wave</th><th>Volume dB</th><th></th></tr></thead>
               <tbody id="ed-tones-body"></tbody>
             </table>
           </div>
@@ -314,7 +372,7 @@
             <label><input type="checkbox" id="ed-notch-harm"> and its harmonics</label>
             <button id="ed-notch-btn" class="small">Remove this frequency</button>
           </div>
-          <p class="hint">Volume is per frequency (−18 dB sits gently under speech; 0 dB is the maximum). Right ear Hz makes a binaural beat: listen with headphones. Built-in "uses" of spiritual and binaural frequencies are popular claims, not proven effects.</p>
+          <p class="hint">Ears: <b>Both ears</b> plays the frequency in both at once; <b>Left/Right ear only</b> puts it in one ear; <b>Different in each ear</b> takes a left and a right Hz (a binaural beat: listen with headphones). Mix several layers, e.g. 432 Hz in both ears plus 528 Hz in the right ear only. Volume is per frequency (−18 dB sits gently under speech; 0 dB is the maximum). Built-in "uses" of spiritual and binaural frequencies are popular claims, not proven effects.</p>
         </details>
         <div class="row">
           <span class="label">Health</span>
