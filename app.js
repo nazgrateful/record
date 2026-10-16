@@ -724,6 +724,7 @@ async function startRecording(opts = {}) {
   r.limit = (+$('opt-stop-h').value || 0) * 3600 + (+$('opt-stop-m').value || 0) * 60;
   recorder = r;
   keepAwake();
+  $('saved-status').hidden = true;
   // Mark these recordings as in progress, so another tab of the site never
   // treats them as interrupted.
   for (const part of r.parts) {
@@ -875,6 +876,32 @@ async function finishRecording(r) {
   const where = [site && 'this website', disk && `"${r.folder.name}" on your computer`, downloaded && 'your downloads'].filter(Boolean);
   const what = r.parts.length > 1 ? `${r.parts.length} files (${r.parts.map((p) => p.kind).join(' + ')})` : `${r.parts[0].rec.name}.${r.parts[0].rec.ext}`;
   if (where.length) toast(`Saved ${what} to ${where.join(', ').replace(/, ([^,]*)$/, ' and $1')}.`, 5000);
+  showSaved(r, { site, disk, downloaded });
+}
+
+// A lasting "✓ Saved" line under the Record buttons, and the new
+// recording(s) highlighted in Saved recordings.
+let newIds = new Set();
+function showSaved(r, { site, disk, downloaded }) {
+  const el = $('saved-status');
+  const secs = r.parts[0] ? r.parts[0].rec.seconds : 0;
+  const names = r.parts.map((p) => `${p.rec.name}.${p.rec.ext}`).join(' + ');
+  const places = [
+    site ? '✓ saved on this website' : '⚠ not saved on this website — download it now',
+    downloaded && '✓ downloaded',
+    disk && `✓ saved in "${r.folder.name}"`,
+  ].filter(Boolean).join(' · ');
+  el.className = site ? 'saved-ok' : 'saved-warn';
+  el.innerHTML = '<b></b> <span></span> <button class="small" type="button">Show it</button>';
+  el.querySelector('b').textContent = `${names} (${fmtTime(secs)})`;
+  el.querySelector('span').textContent = places;
+  el.querySelector('button').onclick = () => {
+    const row = document.querySelector('.recording.new');
+    (row || $('recordings')).scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+  el.hidden = false;
+  newIds = new Set(r.parts.map((p) => p.rec.id));
+  for (const row of document.querySelectorAll('.recording')) row.classList.toggle('new', newIds.has(row.dataset.id));
 }
 
 function triggerDownload(href, filename) {
@@ -978,7 +1005,8 @@ async function renderRecordings() {
     try { u = await urlsFor(rec); } catch { continue; }
     const cues = Array.isArray(rec.cues) ? rec.cues.length : 0;
     const row = document.createElement('div');
-    row.className = 'recording';
+    row.className = 'recording' + (newIds.has(rec.id) ? ' new' : '');
+    row.dataset.id = rec.id;
     const media = document.createElement(rec.audioOnly ? 'audio' : 'video');
     media.controls = true;
     media.preload = 'metadata';
@@ -1689,7 +1717,7 @@ function init() {
   const canMp4 = !!(window.MediaRecorder && recorderMp4(true, true));
   const ftOpt = $('opt-filetype').querySelector('[value=mp4]');
   ftOpt.disabled = !canMp4;
-  if (!canMp4) ftOpt.textContent += ' — not in this browser (record WebM, then Convert)';
+  if (!canMp4) ftOpt.textContent = 'MP4 — not in this browser (use Convert later)';
   $('opt-filetype').value = canMp4 && settings.fileType === 'mp4' ? 'mp4' : 'webm';
   $('opt-filetype').addEventListener('change', () => { settings.fileType = $('opt-filetype').value; saveSettings(); });
   $('add-files').addEventListener('change', async (e) => { await addFiles([...e.target.files]); e.target.value = ''; });
