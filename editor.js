@@ -11,8 +11,10 @@ import * as pcm from './pcm.js';
 import { decodeFile } from './decoders.js';
 import { encode, docSource, formatById, FORMATS, supportedFormats, downloadParts } from './export.js';
 import { analyze, suggestions } from './health.js';
-import { addTones, describe, WAVES, BINAURAL_PRESETS } from './tones.js';
+import { addTones, describe, normalizeLayer, freqsFor, WAVES, EARS, BINAURAL_PRESETS } from './tones.js';
 import { PRESET_LIBRARY } from './presets.js';
+import { Wsola, Resampler } from './stretch.js';
+import { findStreetNoise, tonalPeaks, TYPES as STREET_TYPES } from './street.js';
 
 const $ = (id) => document.getElementById(id);
 const UNDO_LIMIT = 50;
@@ -46,6 +48,10 @@ export function initEditor(d) {
   setupWave();
   setupOverview();
   setupTones();
+  for (const b of document.querySelectorAll('[data-speed]')) {
+    b.addEventListener('click', () => { if (doc && !busy) changeSpeed(+b.dataset.speed); });
+  }
+  $('ed-rate').addEventListener('change', () => { if (playing) { const sel = hasSel() && playing.to === selB; stop(); play(sel); } });
 
   const actions = {
     'ed-play': () => (playing ? stop() : play(false)),
@@ -85,6 +91,11 @@ export function initEditor(d) {
     'ed-tones-apply': applyTones,
     'ed-tones-preview': previewTones,
     'ed-notch-btn': removeFrequency,
+    'ed-speed-apply': () => changeSpeed(+$('ed-speed').value / 100),
+    'ed-street-find': findStreet,
+    'ed-street-apply': applyStreet,
+    'ed-street-all': () => { streetEvents.forEach((e) => { e.on = true; }); renderStreet(); },
+    'ed-street-none': () => { streetEvents.forEach((e) => { e.on = false; }); renderStreet(); },
   };
   for (const [id, fn] of Object.entries(actions)) {
     $(id).addEventListener('click', () => { if (doc && !busy) fn(); });
@@ -414,7 +425,8 @@ async function play(selectionOnly) {
   if ($('ed-detect').checked) out.connect(nodes.intIn);
   const from = selectionOnly ? selA : selA >= total ? 0 : selA;
   const to = selectionOnly ? selB : total;
-  const p = { ctx, out, from, to, loop: $('ed-loop').checked, startAt: null, stopped: false, endsAt: null, sources: new Set() };
+  const speed = +$('ed-rate').value || 1; // listening speed only (pitch changes)
+  const p = { ctx, out, from, to, speed, loop: $('ed-loop').checked, startAt: null, stopped: false, endsAt: null, sources: new Set() };
   playing = p;
   $('ed-play').textContent = '❚❚ Pause';
   requestAnimationFrame(tick);
@@ -433,12 +445,13 @@ async function play(selectionOnly) {
     chs.forEach((x, c) => buf.copyToChannel(x, c));
     const s = ctx.createBufferSource();
     s.buffer = buf;
+    s.playbackRate.value = speed;
     s.connect(out);
     if (p.startAt === null) { p.startAt = t = ctx.currentTime + 0.05; }
     s.start(t);
     p.sources.add(s);
     s.onended = () => p.sources.delete(s);
-    t += n / doc.rate;
+    t += n / doc.rate / speed;
     pos += n;
     while (!p.stopped && t - ctx.currentTime > 4) await new Promise((r) => setTimeout(r, 250));
   }
@@ -459,7 +472,7 @@ function stop() {
 
 function position(p) {
   if (p.startAt === null) return p.from;
-  const played = Math.max(0, (p.ctx.currentTime - p.startAt) * doc.rate);
+  const played = Math.max(0, (p.ctx.currentTime - p.startAt) * doc.rate * p.speed);
   if (p.loop) return p.from + Math.floor(played % Math.max(1, p.to - p.from));
   return Math.min(p.to, Math.round(p.from + played));
 }
@@ -690,6 +703,7 @@ function drawWave(g, h, p, col) {
 }
 
 function draw() {
+  updateTonesTarget();
   if (drawQueued) return;
   drawQueued = true;
   requestAnimationFrame(() => { drawQueued = false; if (!playing) render(); });
@@ -719,6 +733,17 @@ function render(playPos) {
     g.fillText(fmt(t, step < 1), x + 3 * dpr, 2 * dpr);
   }
   if (hasSel()) { g.fillStyle = c.wave + '33'; g.fillRect(xOf(selA), 0, xOf(selB) - xOf(selA), h); }
+  // Street noises found: coloured bands (ticked ones stronger).
+  if (streetFresh()) {
+    for (const ev of streetEvents) {
+      if (ev.end < view0 || ev.start > view1) continue;
+      const col = STREET_TYPES[ev.type].color;
+      g.fillStyle = col + (ev.on ? '30' : '14');
+      g.fillRect(xOf(ev.start), 0, Math.max(dpr, xOf(ev.end) - xOf(ev.start)), h);
+      g.fillStyle = col;
+      g.fillRect(xOf(ev.start), h - 5 * dpr, Math.max(dpr, xOf(ev.end) - xOf(ev.start)), 5 * dpr);
+    }
+  }
   g.fillStyle = c.text;
   g.fillRect(xOf(selA) - dpr / 2, 0, dpr, h);
   if (hasSel()) g.fillRect(xOf(selB) - dpr / 2, 0, dpr, h);
@@ -731,6 +756,12 @@ function render(playPos) {
   const oxOf = (s) => (s / total) * ow;
   o.clearRect(0, 0, ow, oh);
   drawWave(o, oh, overview, c.muted);
+  if (streetFresh()) {
+    for (const ev of streetEvents) {
+      o.fillStyle = STREET_TYPES[ev.type].color;
+      o.fillRect((ev.start / total) * ow, 0, Math.max(2 * odpr, ((ev.end - ev.start) / total) * ow), 4 * odpr);
+    }
+  }
   if (hasSel()) { o.fillStyle = c.wave + '55'; o.fillRect(oxOf(selA), 0, Math.max(odpr, oxOf(selB) - oxOf(selA)), oh); }
   const vx = oxOf(view0), vw = Math.max(6 * odpr, oxOf(view1) - vx);
   o.fillStyle = c.wave + '22';
@@ -949,7 +980,12 @@ function filterRange(label, a, b, build) {
 
 let previewNodes = null;
 
-function layers() { return deps.settings.toneLayers; }
+function layers() {
+  const s = deps.settings;
+  if (!Array.isArray(s.toneLayers)) s.toneLayers = [];
+  s.toneLayers = s.toneLayers.map(normalizeLayer);
+  return s.toneLayers;
+}
 function saveLayers() { deps.saveSettings(); renderLayers(); }
 
 function setupTones() {
@@ -962,11 +998,12 @@ function setupTones() {
     const v = pick.value;
     pick.value = '';
     if (!v) return;
+    const ears = $('ed-tones-ears').value;
     let layer;
-    if (v === 'custom') layer = { name: 'Custom tone', left: 432 };
-    else if (v.startsWith('bin:')) { const b = BINAURAL_PRESETS[+v.slice(4)]; layer = { name: b.name, left: b.left, right: b.right }; }
-    else { const [, f, ...name] = v.split(':'); layer = { name: name.join(':'), left: +f }; }
-    layers().push({ id: Math.random().toString(36).slice(2, 9), wave: 'sine', db: -18, right: 0, ...layer });
+    if (v === 'custom') layer = { name: 'Custom tone', ears, hz: 432 };
+    else if (v.startsWith('bin:')) { const b = BINAURAL_PRESETS[+v.slice(4)]; layer = { name: b.name, ears: 'split', left: b.left, right: b.right, hz: b.left }; }
+    else { const [, f, ...name] = v.split(':'); layer = { name: name.join(':'), ears, hz: +f }; }
+    layers().push(normalizeLayer({ id: Math.random().toString(36).slice(2, 9), wave: 'sine', db: -18, ...layer }));
     saveLayers();
   });
   $('ed-new-tones').addEventListener('click', newToneAudio);
@@ -976,8 +1013,13 @@ function setupTones() {
 }
 
 // The "+ Add a frequency" menu, refreshed each time (named frequencies change).
+let pickerKey = null;
+
 function fillPicker() {
   const pick = $('ed-tones-add');
+  const key = JSON.stringify(deps.settings.targets.map((t) => [t.name, t.freq]));
+  if (key === pickerKey) return; // unchanged: don't rebuild while it's in use
+  pickerKey = key;
   const opt = (label, value) => new Option(label, value);
   const group = (label, opts) => { const g = document.createElement('optgroup'); g.label = label; g.append(...opts); return g; };
   const named = deps.settings.targets.filter((t) => t.freq > 0);
@@ -992,33 +1034,58 @@ function fillPicker() {
 
 const hz = (f) => (f >= 1000 ? `${+(f / 1000).toFixed(2)} kHz` : `${+(+f).toFixed(2)} Hz`);
 
+let renderingLayers = false;
+
 function renderLayers() {
+  if (renderingLayers) return;
+  renderingLayers = true;
+  try { drawLayers(); } finally { renderingLayers = false; }
+}
+
+function drawLayers() {
   const body = $('ed-tones-body');
   const list = layers();
+  // Let a box being edited commit before the rows are rebuilt.
+  if (body.contains(document.activeElement)) document.activeElement.blur();
   if (!list.length) {
     body.innerHTML = '<tr><td colspan="6" class="muted">No frequencies yet: choose one from "+ Add a frequency".</td></tr>';
   } else {
     body.replaceChildren(...list.map((l) => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><input type="text" data-k="name"></td>
-        <td><input type="number" data-k="left" min="1" max="24000" step="any" class="num"></td>
-        <td><input type="number" data-k="right" min="0" max="24000" step="any" class="num" placeholder="same"><div class="muted beat"></div></td>
-        <td><select data-k="wave"></select></td>
-        <td><input type="number" data-k="db" min="-60" max="0" step="1" class="num"></td>
+      tr.innerHTML = `<td><input type="text" data-k="name" aria-label="Name"></td>
+        <td><select data-k="ears" aria-label="Ears"></select></td>
+        <td class="hz-cell">
+          <label class="one"><input type="number" data-k="hz" min="1" max="24000" step="any" class="num"> Hz</label>
+          <label class="two">L <input type="number" data-k="left" min="1" max="24000" step="any" class="num"></label>
+          <label class="two">R <input type="number" data-k="right" min="1" max="24000" step="any" class="num"></label>
+          <div class="muted beat"></div>
+        </td>
+        <td><select data-k="wave" aria-label="Wave"></select></td>
+        <td><input type="number" data-k="db" min="-60" max="0" step="1" class="num" aria-label="Volume dB"></td>
         <td><button class="small" data-del title="Remove">✕</button></td>`;
       const $k = (k) => tr.querySelector(`[data-k=${k}]`);
+      $k('ears').append(...Object.entries(EARS).map(([v, label]) => new Option(label, v)));
       $k('wave').append(...Object.entries(WAVES).map(([v, label]) => new Option(label, v)));
-      $k('name').value = l.name;
-      $k('left').value = l.left;
-      $k('right').value = l.right > 0 ? l.right : '';
-      $k('wave').value = l.wave;
-      $k('db').value = l.db;
+      const split = l.ears === 'split';
+      tr.querySelector('.one').hidden = split;
+      tr.querySelectorAll('.two').forEach((e) => { e.hidden = !split; });
+      for (const k of ['name', 'ears', 'hz', 'left', 'right', 'wave', 'db']) $k(k).value = l[k];
       tr.querySelector('.beat').textContent = describe(l);
+      const num = (k, min, max, dflt) => Math.min(max, Math.max(min, +$k(k).value || dflt));
       $k('name').addEventListener('change', () => { l.name = $k('name').value; deps.saveSettings(); });
-      $k('left').addEventListener('change', () => { l.left = Math.max(1, +$k('left').value || 1); saveLayers(); });
-      $k('right').addEventListener('change', () => { l.right = Math.max(0, +$k('right').value || 0); saveLayers(); });
+      $k('ears').addEventListener('change', () => {
+        const was = l.ears;
+        l.ears = $k('ears').value;
+        // Switching to "different in each ear" starts from the current Hz.
+        if (l.ears === 'split' && was !== 'split') { l.left = l.hz; l.right = l.hz + 4; }
+        if (l.ears !== 'split' && was === 'split') l.hz = l.left;
+        saveLayers();
+      });
+      $k('hz').addEventListener('change', () => { l.hz = num('hz', 1, 24000, 432); saveLayers(); });
+      $k('left').addEventListener('change', () => { l.left = num('left', 1, 24000, 432); saveLayers(); });
+      $k('right').addEventListener('change', () => { l.right = num('right', 1, 24000, 432); saveLayers(); });
       $k('wave').addEventListener('change', () => { l.wave = $k('wave').value; deps.saveSettings(); });
-      $k('db').addEventListener('change', () => { l.db = Math.min(0, Math.max(-60, +$k('db').value || -18)); saveLayers(); });
+      $k('db').addEventListener('change', () => { l.db = num('db', -60, 0, -18); saveLayers(); });
       tr.querySelector('[data-del]').addEventListener('click', () => {
         deps.settings.toneLayers = list.filter((x) => x !== l);
         saveLayers();
@@ -1028,23 +1095,38 @@ function renderLayers() {
   }
   $('ed-tones-apply').disabled = !list.length;
   $('ed-tones-preview').disabled = !list.length;
+  updateTonesTarget();
+}
+
+// Says exactly which sound the frequencies will go into.
+export function updateTonesTarget() {
+  const el = $('ed-tones-target');
+  if (!el) return;
+  if (!doc) { el.textContent = 'No sound open: import one, pick "Add frequencies" on a saved recording, or start from silence.'; return; }
+  const where = $('ed-tones-where').value;
+  el.textContent = where === 'insert'
+    ? `Into "${doc.name}": new audio inserted at ${fmt(selA / doc.rate)}.`
+    : hasSel()
+      ? `Into "${doc.name}": the selected part ${fmt(selA / doc.rate)} – ${fmt(selB / doc.rate)}.`
+      : `Into "${doc.name}": the whole sound (${fmt(total / doc.rate)}). Drag on the waveform to add them to just one part.`;
 }
 
 function updateTonesUi() {
+  updateTonesTarget();
   const insert = $('ed-tones-where').value === 'insert';
   $('ed-tones-length-wrap').hidden = !insert;
   $('ed-tones-original-wrap').hidden = insert;
 }
 
 async function applyTones() {
-  const list = layers().filter((l) => l.left > 0);
+  const list = layers();
   if (!list.length) return deps.toast('Add a frequency first.');
   stop();
-  if (doc.ch < 2 && list.some((l) => l.right > 0)) {
-    deps.toast('This audio is mono, so binaural pairs are mixed into one channel (a pulsing beat). Import without "mono" for true binaural beats.', 8000);
+  if (doc.ch < 2 && list.some((l) => l.ears !== 'both')) {
+    deps.toast('This sound is mono (one channel), so left/right choices are mixed into that one channel. Import it without "mono" to place frequencies in each ear.', 8000);
   }
   const fade = Math.round(doc.rate * Math.max(0, +$('ed-tones-fade').value || 0));
-  const label = list.length === 1 ? `${list[0].name} (${hz(list[0].left)})` : `${list.length} frequencies`;
+  const label = list.length === 1 ? `${list[0].name} (${list[0].ears === 'split' ? `${hz(list[0].left)} / ${hz(list[0].right)}` : hz(list[0].hz)})` : `${list.length} frequencies`;
   if ($('ed-tones-where').value === 'insert') {
     const secs = parseTime($('ed-tones-length').value);
     if (!(secs > 0)) return deps.toast('Type how long to insert, e.g. 30, 5:00 or 1:00:00.');
@@ -1086,7 +1168,7 @@ async function applyTones() {
 // Plays the tones alone for 6 seconds (or stops a preview).
 async function previewTones() {
   if (previewNodes) { stopPreview(); return; }
-  const list = layers().filter((l) => l.left > 0);
+  const list = layers();
   if (!list.length) return;
   const { ctx } = await deps.audioGraph();
   const out = ctx.createGain();
@@ -1099,7 +1181,7 @@ async function previewTones() {
   out.gain.linearRampToValueAtTime(0, now + secs);
   const oscs = [];
   for (const l of list) {
-    for (const [ch, f] of [[0, l.left], [1, l.right > 0 ? l.right : l.left]]) {
+    for (const [ch, f] of [0, 1].flatMap((c) => freqsFor(l, c, true).map((f) => [c, f]))) {
       const o = ctx.createOscillator();
       o.type = l.wave;
       o.frequency.value = f;
@@ -1144,6 +1226,15 @@ async function removeFrequency() {
   if (ok) deps.toast(`Removed ${hz(f)}${harmonics > 1 ? ' and its harmonics' : ''} from ${hasSel() ? 'the selection' : 'the whole recording'}.`);
 }
 
+// Opens a sound (e.g. a saved recording) with the frequencies panel ready.
+export async function openForTones(file, name) {
+  await openFile(file, name);
+  if (!doc) return;
+  $('ed-tones').open = true;
+  updateTonesTarget();
+  $('ed-tones').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 // A new, silent audio to build a frequency track on.
 async function newToneAudio() {
   const secs = parseTime($('ed-new-length').value);
@@ -1159,6 +1250,247 @@ async function newToneAudio() {
   $('ed-tones').open = true;
   deps.toast(`New ${fmt(secs)} audio. Add frequencies below, then press "Add to audio".`, 6000);
   $('ed-tones').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// ---------------------------------------------------------------- speed --
+
+// Slows down / speeds up the selection (or everything). With "keep pitch"
+// voices stay natural (time-stretch); without it, it's like a tape played
+// faster or slower.
+async function changeSpeed(speed) {
+  if (!(speed >= 0.25 && speed <= 4)) return deps.toast('Speed must be between 25% and 400%.');
+  if (speed === 1) return;
+  const keep = $('ed-keep-pitch').checked;
+  const [a, b] = range();
+  const proc = keep ? new Wsola(doc.ch, doc.rate, speed) : new Resampler(doc.ch, speed);
+  const what = speed < 1 ? `Slowing down to ${Math.round(speed * 100)}%` : `Speeding up to ${Math.round(speed * 100)}%`;
+  const ok = await transform(`${what}…`, a, b, proc);
+  if (ok) deps.toast(`${what.replace('Slowing', 'Slowed').replace('Speeding', 'Sped')} ${keep ? '(same pitch)' : '(pitch changed too)'}.`);
+}
+
+// Like rewrite(), but the result may be longer or shorter than [a, b).
+async function transform(label, a, b, proc) {
+  stop();
+  let ok = false;
+  const wasSel = hasSel();
+  await job(label, async (progress) => {
+    const writer = new pcm.BlockWriter(doc);
+    try {
+      for (let pos = a; pos < b;) {
+        const n = Math.min(WIN, b - pos);
+        for (const part of proc.push(await pcm.readRange(doc, pos, n))) writer.push(part);
+        await writer.drain();
+        pos += n;
+        progress((pos - a) / (b - a));
+        await new Promise((r) => setTimeout(r));
+      }
+      for (const part of proc.flush()) writer.push(part);
+      const segs = await writer.finish();
+      setSegs(pcm.replace(doc.segs, a, b, segs));
+      const n = pcm.totalLen(segs);
+      if (wasSel) { selA = a; selB = a + n; } else { selA = selB = 0; }
+      view0 = 0; view1 = total;
+      draw();
+      ok = true;
+    } catch (err) {
+      deps.toast(`${label.replace('…', '')} failed: ${err.message}`, 8000);
+    }
+  });
+  return ok;
+}
+
+// --------------------------------------------------------- street noise --
+
+let streetEvents = [];
+let streetFor = null;     // the segments the events were found in
+let streetRumble = false;
+
+const streetFresh = () => streetEvents.length && doc && streetFor === doc.segs;
+
+async function findStreet() {
+  stop();
+  await job('Listening for street noises…', async (progress) => {
+    try {
+      const r = await findStreetNoise(doc, { sensitivity: +$('ed-street-sens').value, onProgress: progress });
+      streetEvents = r.events.map((e) => ({ ...e, on: e.conf >= 0.35 }));
+      streetFor = doc.segs;
+      streetRumble = r.backgroundRumble;
+      renderStreet();
+      draw();
+    } catch (err) {
+      deps.toast('Searching failed: ' + err.message, 7000);
+    }
+  });
+}
+
+function renderStreet() {
+  const box = $('ed-street-list');
+  const fresh = streetFresh();
+  const counts = {};
+  for (const e of streetEvents) counts[e.type] = (counts[e.type] || 0) + 1;
+  const summary = streetEvents.length
+    ? `Found ${streetEvents.length}: ` + Object.entries(counts).map(([t, n]) => `${n} ${STREET_TYPES[t].label.toLowerCase()}${n > 1 ? 's' : ''}`).join(', ')
+    : streetFor ? 'No street noises found.' : '';
+  $('ed-street-summary').textContent = fresh || !streetEvents.length ? summary : 'The audio changed since the search; press "Find street noises" again.';
+  const rows = [];
+  if (streetRumble && streetFor) {
+    const row = document.createElement('div');
+    row.className = 'health warn';
+    row.innerHTML = '<span class="icon">⚠</span><div><b>Constant traffic rumble in the background</b><div class="muted">Deep traffic noise runs through most of the recording. A low cut removes it without touching voices; Remove noise takes care of the rest of the hiss.</div></div><span class="row"><button class="small" data-a="highpass">Cut rumble</button><button class="small" data-a="denoise">Remove noise</button></span>';
+    for (const b of row.querySelectorAll('button')) b.addEventListener('click', async () => { if (!busy) { await applyFix(b.dataset.a); streetFor = null; renderStreet(); } });
+    rows.push(row);
+  }
+  if (fresh) {
+    for (const ev of streetEvents) {
+      const t = STREET_TYPES[ev.type];
+      const row = document.createElement('div');
+      row.className = 'street-row';
+      row.innerHTML = `<input type="checkbox" aria-label="Remove this one">
+        <span class="swatch" style="background:${t.color}"></span>
+        <span class="street-name"></span>
+        <span class="muted street-time"></span>
+        <span class="muted street-conf"></span>
+        <span class="street-btns"><button class="small" data-play title="Listen (with a bit before and after)">▶</button><button class="small" data-sel>Select</button></span>`;
+      const cb = row.querySelector('input');
+      cb.checked = ev.on;
+      cb.addEventListener('change', () => { ev.on = cb.checked; updateStreetButton(); draw(); });
+      row.querySelector('.street-name').textContent = `${t.icon} ${t.label}${ev.freq ? ` (${hz(ev.freq)})` : ''}`;
+      row.querySelector('.street-time').textContent = `${fmt(ev.start / doc.rate, true)} – ${fmt(ev.end / doc.rate, true)} (${((ev.end - ev.start) / doc.rate).toFixed(1)} s)`;
+      row.querySelector('.street-conf').textContent = ev.conf >= 0.7 ? 'very likely' : ev.conf >= 0.35 ? 'likely' : 'maybe';
+      row.querySelector('[data-play]').addEventListener('click', () => {
+        if (busy) return;
+        const pad = doc.rate * 0.7;
+        selA = Math.max(0, Math.round(ev.start - pad)); selB = Math.min(total, Math.round(ev.end + pad));
+        zoomToSelection();
+        play(true);
+      });
+      row.querySelector('[data-sel]').addEventListener('click', () => { selA = ev.start; selB = ev.end; zoomToSelection(); });
+      rows.push(row);
+    }
+  }
+  box.replaceChildren(...rows);
+  $('ed-street-actions').hidden = !fresh;
+  updateStreetButton();
+}
+
+function updateStreetButton() {
+  const n = streetEvents.filter((e) => e.on).length;
+  $('ed-street-apply').textContent = `Remove ticked (${n})`;
+  $('ed-street-apply').disabled = !n;
+}
+
+// Joins overlapping ranges (keeping all their kinds and pitches).
+function unionRanges(evs) {
+  const out = [];
+  for (const e of [...evs].sort((a, b) => a.start - b.start)) {
+    const last = out[out.length - 1];
+    if (last && e.start <= last.end + doc.rate * 0.03) { last.end = Math.max(last.end, e.end); last.evs.push(e); }
+    else out.push({ start: e.start, end: e.end, evs: [e] });
+  }
+  return out;
+}
+
+async function applyStreet() {
+  if (!streetFresh()) return deps.toast('Press "Find street noises" first.');
+  const ranges = unionRanges(streetEvents.filter((e) => e.on));
+  if (!ranges.length) return;
+  const mode = $('ed-street-action').value;
+  stop();
+  let ok = false;
+  await job('Removing street noises…', async (progress) => {
+    try {
+      let segs = doc.segs;
+      const rate = doc.rate;
+      // Work from the end so earlier positions stay valid.
+      const desc = [...ranges].reverse();
+      for (let i = 0; i < desc.length; i++) {
+        const r = desc[i];
+        if (mode === 'cut') {
+          // Cut it out, crossfading the two sides over 10 ms (no click).
+          const X = Math.min(Math.round(rate * 0.01), r.start, total - r.end);
+          if (X > 0) {
+            const A = await pcm.readRange(doc, r.start - X, X), B = await pcm.readRange(doc, r.end, X);
+            const mixed = A.map((a, c) => a.map((v, k) => v * (1 - k / X) + B[c][k] * (k / X)));
+            const w = new pcm.BlockWriter(doc);
+            w.push(mixed);
+            segs = pcm.replace(segs, r.start - X, r.end + X, await w.finish());
+          } else segs = pcm.replace(segs, r.start, r.end, []);
+        } else {
+          // For horns and squeals, find their exact tones (two-tone horns
+          // have two notes) so the filter can take all of them out.
+          if (mode === 'filter' && r.evs.some((e) => e.type === 'horn' || e.type === 'squeal')) {
+            const n = Math.min(r.end - r.start, rate * 3);
+            r.tones = tonalPeaks(await pcm.readRange(doc, r.start, n), rate);
+          }
+          const w = new pcm.BlockWriter(doc);
+          for (let pos = r.start; pos < r.end;) {
+            const n = Math.min(WIN, r.end - pos);
+            w.push(await streetPiece(r, pos, n, mode));
+            await w.drain();
+            pos += n;
+          }
+          segs = pcm.replace(segs, r.start, r.end, await w.finish());
+        }
+        progress((i + 1) / desc.length);
+      }
+      const removed = ranges.reduce((n, r) => n + r.end - r.start, 0);
+      selA = selB = Math.min(selA, total);
+      setSegs(segs);
+      streetEvents = streetEvents.filter((e) => !e.on);
+      streetFor = null;
+      renderStreet();
+      ok = { n: ranges.length, secs: removed / rate };
+    } catch (err) {
+      deps.toast('Removing failed: ' + err.message, 8000);
+    }
+  });
+  if (ok) {
+    const how = { cut: 'Cut out', filter: 'Filtered out', duck: 'Turned down', silence: 'Silenced' }[mode];
+    deps.toast(`${how} ${ok.n} street noise${ok.n === 1 ? '' : 's'} (${ok.secs.toFixed(1)} s). Undo brings them back.`, 6000);
+  }
+}
+
+// One piece of a range with the noise turned down, silenced or filtered;
+// 40 ms ramps at the edges so nothing clicks.
+async function streetPiece(r, pos, n, mode) {
+  const rate = doc.rate, R = Math.round(rate * 0.04);
+  const ramp = (k) => Math.min(1, (k - r.start) / R, (r.end - k) / R);
+  const types = new Set(r.evs.map((e) => e.type));
+  const canFilter = mode === 'filter' && ![...types].some((t) => t === 'siren' || t === 'bang');
+  if (!canFilter) {
+    // Silence, or turn down 20 dB (also used for sirens and bangs, which move
+    // too much to filter cleanly).
+    const G = mode === 'silence' ? 0 : 0.1;
+    const chs = await pcm.readRange(doc, pos, n);
+    for (const x of chs) for (let i = 0; i < n; i++) { const w = ramp(pos + i); x[i] *= 1 - (1 - G) * Math.max(0, w); }
+    return chs;
+  }
+  // Filter: high-pass for engines/rumble; notches at the horn/squeal pitch
+  // and its harmonics. Rendered with a second of sound before it so the
+  // filters are settled.
+  const pre = Math.min(rate, pos);
+  const input = await pcm.readRange(doc, pos - pre, n + pre);
+  const oc = new OfflineAudioContext(doc.ch, n + pre, rate);
+  const b = oc.createBuffer(doc.ch, n + pre, rate);
+  input.forEach((x, c) => b.copyToChannel(x, c));
+  const src = oc.createBufferSource();
+  src.buffer = b;
+  let node = src;
+  const add = (type, f, q) => { const bq = oc.createBiquadFilter(); bq.type = type; bq.frequency.value = f; bq.Q.value = q; node.connect(bq); node = bq; };
+  if (types.has('vehicle')) for (let k = 0; k < 3; k++) add('highpass', 180, 0.707);
+  const tones = r.tones && r.tones.length ? r.tones : r.evs.filter((e) => e.freq).map((e) => e.freq);
+  for (const f of tones) {
+    for (let k = 1; k <= 6 && f * k < rate / 2; k++) { add('notch', f * k, 15); add('notch', f * k, 15); }
+  }
+  node.connect(oc.destination);
+  src.start();
+  const out = await oc.startRendering();
+  return input.map((x, c) => {
+    const f = out.getChannelData(c);
+    const y = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const w = Math.max(0, ramp(pos + i)); y[i] = x[pre + i] * (1 - w) + f[pre + i] * w; }
+    return y;
+  });
 }
 
 // Exposed for automated tests.

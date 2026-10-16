@@ -55,12 +55,24 @@ specific frequencies** when they show up in the audio.
     selection / silence, with undo and redo.
   - Effects on the selection (or everything): fade in/out, normalize, change
     volume, reverse, and noise removal (optionally learned from a selection).
+  - **Speed**: slow down (0.5×, 0.75×, 0.9×) or speed up (1.1×–2×, or any
+    25–400%) the selection or everything, keeping the pitch (time-stretch,
+    voices stay natural) or like a tape (pitch changes too). "Listen at"
+    plays faster/slower without changing the audio.
+  - **Street noise**: finds car horns (including two-tone horns), sirens,
+    brake squeals/whistles, passing vehicles/engines and bangs/knocks, marks
+    them on the waveform and lists them to listen to and tick; then cut them
+    out (with a crossfade), filter them out (keeps the voice), turn them down
+    or silence them, in one undoable step. Constant traffic rumble is pointed
+    out with one-click fixes. It's pattern-based, so check the list first.
   - **Add frequencies**: layer tones from your named frequencies, the
     built-in library (Solfeggio, 432 Hz, planetary, Hemi-Sync…), ready-made
-    binaural beats, or any Hz. Each layer has its own wave (sine, triangle,
-    square, sawtooth), volume and an optional different right-ear frequency
-    (binaural beat). Mix them into the selection or the whole audio (keeping,
-    lowering or replacing the original), or insert them at the cursor; fades
+    binaural beats, or any Hz. For each one choose the ears: both ears at
+    once, left only, right only, or a different Hz in each ear (binaural
+    beat); plus wave (sine, triangle, square, sawtooth) and volume. The panel
+    says exactly which sound they go into: the selection, the whole sound,
+    or new audio inserted at the cursor (keeping, lowering or replacing the
+    original); any saved recording has an **Add frequencies** button. Fades
     avoid clicks; preview first. **New audio from frequencies** starts from
     silence of any length (e.g. a 1-hour 432 Hz track). **Remove this
     frequency** (and optionally its harmonics) with narrow notch filters.
@@ -144,6 +156,8 @@ microphone still works there.
 - `decoders.js`: streaming import (WAV, WebM/MKV, Ogg, MP3, MP4/M4A).
 - `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
 - `tones.js`: tone / binaural-beat generator for Add frequencies.
+- `stretch.js`: speed changes (time-stretch keeping pitch, and resampling).
+- `street.js`: the street-noise finder.
 - `health.js`: the audio health check and sound check suggestions.
 - `tap-worklet.js`: hands live audio to the sound check.
 - `tests/upgrade-check.mjs`: checks updates keep all saved data (`npm run test:upgrade`).

@@ -1,6 +1,6 @@
 import { PRESET_LIBRARY, NOTE_NAMES, noteToFreq, freqToNote, beatBand } from './presets.js';
 import * as store from './db.js';
-import { initEditor, openFile as openInEditor, fillFormats, renderHealthList } from './editor.js';
+import { initEditor, openFile as openInEditor, openForTones, fillFormats, renderHealthList } from './editor.js';
 import { Stats, liveSuggestions } from './health.js';
 import { encode, fileSource, formatById, downloadParts } from './export.js';
 
@@ -939,6 +939,7 @@ async function renderRecordings() {
         <a download="${rec.name}.srt" href="${u.srt}">Subtitles (.srt)</a>
         <span class="convert"><select data-fmt aria-label="Convert to"></select><button class="small" data-convert>Convert &amp; download</button></span>
         <button class="small" data-edit>Edit</button>
+        <button class="small" data-tones>Add frequencies</button>
         <button class="small" data-del>Delete</button>
       </div>`;
     info.querySelector('.rec-name').textContent = `${rec.name}.${rec.ext}`;
@@ -951,6 +952,11 @@ async function renderRecordings() {
     const fmtSel = info.querySelector('[data-fmt]');
     fillFormats(fmtSel);
     info.querySelector('[data-convert]').addEventListener('click', (e) => convertRecording(rec, fmtSel.value, e.target));
+    info.querySelector('[data-tones]').addEventListener('click', async () => {
+      try {
+        openForTones(rec.memoryBlob || (await store.getBlob(rec)), rec.name);
+      } catch (err) { toast('Could not open it: ' + err.message, 6000); }
+    });
     info.querySelector('[data-edit]').addEventListener('click', async () => {
       try {
         openInEditor(rec.memoryBlob || (await store.getBlob(rec)), rec.name);

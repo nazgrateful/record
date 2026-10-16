@@ -74,7 +74,10 @@ function seed(version) {
         t.objectStore('pcmMeta').put(meta, 'doc-old:b1');
         t.objectStore('kv').put({ id: 'doc-old', name: 'editing', rate: 48000, ch: 1, segs: [{ key: 'doc-old:b1', start: 0, end: 4096 }] }, 'editorDoc');
       }
-      localStorage.setItem('freq-recorder.v1', JSON.stringify({ targets: [{ id: 'x1', name: 'My tone', freq: 432, tolerance: 2, mute: true }], threshold: 0.4, minDb: -60, holdMs: 300 }));
+      const saved = { targets: [{ id: 'x1', name: 'My tone', freq: 432, tolerance: 2, mute: true }], threshold: 0.4, minDb: -60, holdMs: 300 };
+      // Frequency layers as first saved: { left, right } (right 0 = same).
+      if (version >= 3) saved.toneLayers = [{ id: 'l1', name: 'old binaural', left: 100, right: 104, wave: 'sine', db: -18 }, { id: 'l2', name: 'old 432', left: 432, right: 0, wave: 'triangle', db: -12 }];
+      localStorage.setItem('freq-recorder.v1', JSON.stringify(saved));
       t.oncomplete = () => { db.close(); resolve(expected); };
       t.onerror = () => reject(t.error);
     };
@@ -89,7 +92,11 @@ async function readBack() {
     out[r.id] = { rec: r, bytes: Array.from(new Uint8Array(await (await store.getBlob(r)).arrayBuffer())) };
   }
   const ed = await import('./editor.js');
-  return { recs: out, settings: JSON.parse(localStorage.getItem('freq-recorder.v1')), editor: ed.editorState.doc && { name: ed.editorState.doc.name, total: ed.editorState.total }, shown: document.querySelectorAll('#recordings .recording').length };
+  const layers = [...document.querySelectorAll('#ed-tones-body tr')].map((tr) => {
+    const v = (k) => tr.querySelector(`[data-k=${k}]`)?.value;
+    return v('name') && { name: v('name'), ears: v('ears'), hz: +v('hz'), left: +v('left'), right: +v('right'), wave: v('wave'), db: +v('db') };
+  }).filter(Boolean);
+  return { layers, recs: out, settings: JSON.parse(localStorage.getItem('freq-recorder.v1')), editor: ed.editorState.doc && { name: ed.editorState.doc.name, total: ed.editorState.total }, shown: document.querySelectorAll('#recordings .recording').length };
 }
 
 async function freshPage() {
@@ -117,6 +124,11 @@ for (const version of [1, 2, 3]) {
   check(got.shown === Object.keys(expected).length, `all ${Object.keys(expected).length} recordings shown on the page (${got.shown})`);
   check(got.settings && got.settings.targets.some((t) => t.name === 'My tone' && t.freq === 432 && t.mute) && got.settings.threshold === 0.4, 'settings and named frequencies kept');
   if (version >= 3) check(got.editor && got.editor.name === 'editing' && got.editor.total === 4096, 'audio open in the editor kept');
+  if (version >= 3) {
+    const [a, b] = got.layers;
+    check(got.layers.length === 2 && a.ears === 'split' && a.left === 100 && a.right === 104 && b.ears === 'both' && b.hz === 432 && b.wave === 'triangle' && b.db === -12,
+      'saved frequency layers kept (and shown with their ears)');
+  }
   check(!errors.length, 'no page errors' + (errors.length ? ': ' + errors.join('; ') : ''));
   await ctx.close();
 }

@@ -1,6 +1,7 @@
 // Tone generator for the editor's "Add frequencies": layers of tones (sine,
 // triangle, square or sawtooth), each with its own volume and optionally a
-// different frequency in the right ear (binaural beat).
+// choice of ears: both, left only, right only, or a different frequency in
+// each ear (a binaural beat).
 //
 // Phase is computed from the absolute sample position, so a tone generated
 // window by window joins up seamlessly.
@@ -32,6 +33,37 @@ function wave(type, p) {
   }
 }
 
+export const EARS = {
+  both: 'Both ears',
+  left: 'Left ear only',
+  right: 'Right ear only',
+  split: 'Different in each ear',
+};
+
+// Brings layers saved by earlier versions ({ left, right }) to the current
+// shape ({ ears, hz, left, right }). Missing fields get defaults.
+export function normalizeLayer(l) {
+  const out = { wave: 'sine', db: -18, name: 'Tone', ...l };
+  if (!EARS[out.ears]) {
+    if (out.right > 0 && out.right !== out.left) out.ears = 'split';
+    else { out.ears = 'both'; out.hz = out.left; }
+  }
+  out.hz = +out.hz > 0 ? +out.hz : +out.left > 0 ? +out.left : 432;
+  out.left = +out.left > 0 ? +out.left : out.hz;
+  out.right = +out.right > 0 ? +out.right : out.hz;
+  return out;
+}
+
+// The frequencies one layer plays in channel c (0 = left, 1 = right).
+export function freqsFor(layer, c, stereo) {
+  const { ears, hz, left, right } = layer;
+  if (!stereo) return ears === 'split' ? [left, right] : [hz]; // mono: everything in the one channel
+  if (ears === 'both') return [hz];
+  if (ears === 'left') return c === 0 ? [hz] : [];
+  if (ears === 'right') return c === 1 ? [hz] : [];
+  return [c === 0 ? left : right];
+}
+
 // Adds the layers to `chs` (planar floats for samples [at, at + n) of a span
 // `span` samples long), with fades at both ends of the span.
 export function addTones(chs, layers, { rate, at, span, fade }) {
@@ -40,19 +72,14 @@ export function addTones(chs, layers, { rate, at, span, fade }) {
   for (const layer of layers) {
     const amp = Math.pow(10, layer.db / 20);
     for (let c = 0; c < chs.length; c++) {
-      const right = stereo && c === 1 && layer.right > 0;
-      const freqs = right ? [layer.right]
-        // Mono file with a binaural pair: both tones (heard as a pulsing beat).
-        : !stereo && layer.right > 0 ? [layer.left, layer.right] : [layer.left];
-      const a = amp / freqs.length;
+      const freqs = freqsFor(layer, c, stereo).filter((f) => f > 0 && f < rate / 2);
+      const a = amp / Math.max(1, freqs.length);
       const x = chs[c];
       for (const f of freqs) {
-        if (!(f > 0) || f >= rate / 2) continue;
         for (let i = 0; i < n; i++) {
           const s = at + i;
           const env = fade > 0 ? Math.min(1, s / fade, (span - s) / fade) : 1;
-          const p = ((f * s) / rate) % 1;
-          x[i] += a * env * wave(layer.wave, p);
+          x[i] += a * env * wave(layer.wave, ((f * s) / rate) % 1);
         }
       }
     }
@@ -61,9 +88,10 @@ export function addTones(chs, layers, { rate, at, span, fade }) {
   return chs;
 }
 
+// e.g. "4 Hz beat · Theta" for different tones in each ear.
 export function describe(layer) {
-  if (!(layer.right > 0) || layer.right === layer.left) return '';
+  if (layer.ears !== 'split' || layer.left === layer.right) return '';
   const beat = Math.abs(layer.right - layer.left);
   const band = beatBand(beat);
-  return `${+beat.toFixed(2)} Hz beat${band ? ` · ${band.name}` : ''}`;
+  return `${+beat.toFixed(2)} Hz binaural beat${band ? ` · ${band.name}` : ''}`;
 }
