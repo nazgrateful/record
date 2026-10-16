@@ -8,7 +8,7 @@
 
 const WINDOW = 4 << 20;
 
-class Reader {
+export class Reader {
   constructor(blob) { this.blob = blob; this.size = blob.size; this.pos = 0; this.buf = new Uint8Array(0); this.bs = 0; }
   // Makes n bytes from pos available; returns how many there are (less at the end).
   async ensure(n) {
@@ -330,6 +330,59 @@ async function* mp3Packets(r) {
 
 // ------------------------------------------------------------ MP4 / M4A --
 
+// Walks the moof boxes of a fragmented MP4 and yields the samples of one track.
+async function* fragmentSamples(r, trackId, defaultSize, boxes, dv) {
+  r.pos = 0;
+  while (r.pos < r.size) {
+    if ((await r.ensure(16)) < 8) return;
+    let size = r.at(0) * 2 ** 24 + ((r.at(1) << 16) | (r.at(2) << 8) | r.at(3));
+    const type = r.str(4, 4);
+    let head = 8;
+    if (size === 1) { size = Number(new DataView(r.copy(16).buffer).getBigUint64(8)); head = 16; }
+    if (size === 0) size = r.size - r.pos;
+    if (size < 8) return;
+    const start = r.pos;
+    if (type === 'moof') {
+      await r.ensure(size);
+      const moof = r.copy(size).subarray(head);
+      const samples = [];
+      for (const traf of boxes(moof).filter((b) => b.type === 'traf')) {
+        const kids = boxes(traf.body);
+        const tfhdBox = kids.find((b) => b.type === 'tfhd');
+        if (!tfhdBox) continue;
+        const t = dv(tfhdBox.body), flags = t.getUint32(0) & 0xffffff;
+        if (t.getUint32(4) !== trackId) continue;
+        let o = 8, base = start, dsize = defaultSize;
+        if (flags & 0x1) { base = Number(t.getBigUint64(o)); o += 8; }
+        if (flags & 0x2) o += 4;
+        if (flags & 0x8) o += 4;
+        if (flags & 0x10) dsize = t.getUint32(o);
+        for (const trunBox of kids.filter((b) => b.type === 'trun')) {
+          const u = dv(trunBox.body), tf = u.getUint32(0) & 0xffffff, n = u.getUint32(4);
+          let p = 8, off = base;
+          if (tf & 0x1) { off = base + u.getInt32(p); p += 4; }
+          if (tf & 0x4) p += 4;
+          for (let i = 0; i < n; i++) {
+            if (tf & 0x100) p += 4;
+            let sz = dsize;
+            if (tf & 0x200) { sz = u.getUint32(p); p += 4; }
+            if (tf & 0x400) p += 4;
+            if (tf & 0x800) p += 4;
+            samples.push([off, sz]);
+            off += sz;
+          }
+        }
+      }
+      for (const [off, sz] of samples) {
+        r.pos = off;
+        if ((await r.ensure(sz)) < sz) return;
+        yield r.copy(sz);
+      }
+    }
+    r.pos = start + size;
+  }
+}
+
 async function* mp4Packets(r) {
   // Find the moov box (it can be at the start or the end).
   let moov = null;
@@ -373,12 +426,14 @@ async function* mp4Packets(r) {
   const stbl = child(trak, 'mdia', 'minf', 'stbl');
   const stsd = child(stbl, 'stsd');
   const entry = boxes(stsd.subarray(8))[0];
-  if (!entry || entry.type !== 'mp4a') throw Object.assign(new Error('unsupported MP4 audio ' + (entry && entry.type)), { unsupported: true });
+  if (!entry || (entry.type !== 'mp4a' && entry.type !== 'Opus')) throw Object.assign(new Error('unsupported MP4 audio ' + (entry && entry.type)), { unsupported: true });
   const e = dv(entry.body);
   const qtVer = e.getUint16(8);
   const channels = e.getUint16(16), rate = e.getUint32(24) >>> 16;
-  const esds = child(entry.body.subarray(28 + (qtVer === 1 ? 16 : qtVer === 2 ? 36 : 0)), 'esds');
-  if (!esds) throw Object.assign(new Error('no esds'), { unsupported: true });
+  const children = entry.body.subarray(28 + (qtVer === 1 ? 16 : qtVer === 2 ? 36 : 0));
+  const dOps = entry.type === 'Opus' && child(children, 'dOps');
+  const esds = child(children, 'esds');
+  if (!esds && !dOps) throw Object.assign(new Error('no esds'), { unsupported: true });
   // Walk the MPEG-4 descriptors for the object type and AudioSpecificConfig.
   let objType = 0, asc = null;
   const walk = (b) => {
@@ -398,15 +453,33 @@ async function* mp4Packets(r) {
       o += len;
     }
   };
-  walk(esds.subarray(4));
+  if (esds) walk(esds.subarray(4));
   let config;
-  if (objType === 0x40 && asc) config = { codec: `mp4a.40.${asc[0] >> 3}`, sampleRate: rate, numberOfChannels: channels, description: asc };
+  if (dOps) {
+    // Opus in MP4 (browser recordings): rebuild the OpusHead from dOps.
+    const d = dv(dOps), head = new Uint8Array(19);
+    head.set([...'OpusHead'].map((c) => c.charCodeAt(0)));
+    const h = new DataView(head.buffer);
+    head[8] = 1; head[9] = dOps[1];
+    h.setUint16(10, d.getUint16(2), true); h.setUint32(12, d.getUint32(4), true); h.setInt16(16, d.getInt16(8), true);
+    config = { codec: 'opus', sampleRate: 48000, numberOfChannels: dOps[1], description: head };
+  } else if (objType === 0x40 && asc) config = { codec: `mp4a.40.${asc[0] >> 3}`, sampleRate: rate, numberOfChannels: channels, description: asc };
   else if (objType === 0x6b || objType === 0x69) config = { codec: 'mp3', sampleRate: rate, numberOfChannels: channels };
   else throw Object.assign(new Error('unsupported MP4 audio'), { unsupported: true });
+
+  const tkhd = dv(child(trak, 'tkhd'));
+  const trackId = tkhd.getUint8(0) === 1 ? tkhd.getUint32(20) : tkhd.getUint32(12);
 
   // Sample sizes and file offsets from stsz / stsc / stco.
   const stsz = dv(child(stbl, 'stsz'));
   const fixed = stsz.getUint32(4), count = stsz.getUint32(8);
+  if (!count) {
+    // Fragmented MP4 (what browsers record): samples are listed in moof boxes.
+    const trex = boxes(child(moov, 'mvex') || new Uint8Array(0)).filter((b) => b.type === 'trex').map((b) => dv(b.body)).find((t) => t.getUint32(4) === trackId);
+    yield config;
+    yield* fragmentSamples(r, trackId, trex ? trex.getUint32(16) : 0, boxes, dv);
+    return;
+  }
   const sizeOf = (i) => fixed || stsz.getUint32(12 + 4 * i);
   const stsc = dv(child(stbl, 'stsc'));
   const runs = [];

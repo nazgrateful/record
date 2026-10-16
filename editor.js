@@ -11,6 +11,7 @@ import * as pcm from './pcm.js';
 import { decodeFile } from './decoders.js';
 import { encode, docSource, formatById, FORMATS, supportedFormats, downloadParts } from './export.js';
 import { analyze, suggestions } from './health.js';
+import { VIDEO_FORMATS, videoFormatLabels } from './video.js';
 import { addTones, describe, normalizeLayer, freqsFor, WAVES, EARS, BINAURAL_PRESETS } from './tones.js';
 import { PRESET_LIBRARY } from './presets.js';
 import { Wsola, Resampler } from './stretch.js';
@@ -812,14 +813,26 @@ function fileName() {
 }
 
 // Fills a <select> with the formats this browser can make.
-export async function fillFormats(sel) {
+export async function fillFormats(sel, { video = false } = {}) {
   const ok = await supportedFormats();
-  sel.replaceChildren(...FORMATS.map((f) => {
+  const audio = FORMATS.map((f) => {
     const o = new Option(f.label + (ok[f.id] ? '' : ' — not in this browser'), f.id);
     o.disabled = !ok[f.id];
     return o;
-  }));
-  sel.value = 'mp3';
+  });
+  if (!video) {
+    sel.replaceChildren(...audio);
+    sel.value = 'mp3';
+    return;
+  }
+  // Screen recordings: video formats first, then sound-only ones.
+  const labels = await videoFormatLabels();
+  const group = (label, opts) => { const g = document.createElement('optgroup'); g.label = label; g.append(...opts); return g; };
+  sel.replaceChildren(
+    group('Video', VIDEO_FORMATS.map((f) => new Option(labels[f.id], f.id))),
+    group('Sound only', audio),
+  );
+  sel.value = 'v-mp4';
 }
 
 function exportJob(progress) {
