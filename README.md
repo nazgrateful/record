@@ -25,9 +25,46 @@ specific frequencies** when they show up in the audio.
     automatically, written every second while recording. If the tab crashes
     or closes, it's recovered the next time you open the page. The app asks
     the browser to treat this storage as permanent.
-  - "Also save to a file on my computer" (Chrome/Edge) writes the recording
-    into a file you pick, as it records. Any saved recording can also be
-    downloaded with its subtitles, or deleted.
+  - **Download automatically** when you stop (on by default).
+  - **Auto-save to a folder on your computer**, such as the Desktop
+    (Chrome/Edge): choose the folder once and every recording is written
+    straight into it while recording, with a .vtt subtitle file next to it.
+    The browser may ask you to allow access again after a restart. In other
+    browsers, auto-download saves to your Downloads folder (change the
+    browser's download location to use the Desktop).
+  - Any saved recording can also be downloaded with its subtitles, or deleted.
+- **Separate screen and sound files**: record the screen with sound in one
+  file, or the screen (no sound) and the sound as two separate files that
+  start at the same moment, or just the sound, or just the screen.
+- **Long recordings (12 hours and more)**: recordings stream to storage every
+  second, the computer can be kept awake while recording, there's an optional
+  auto-stop timer, and the storage line shows roughly how many hours fit.
+  Saved recordings get their full length worked out so you can jump anywhere.
+- **Sound check** before recording: 3 s of quiet then 5 s of normal sound
+  through the same chain that gets recorded. It reports level, clipping,
+  background noise, mains hum, rumble, DC offset and stereo problems, with
+  tips and one-click fixes (mic volume, noise removal and learning, a live
+  50/60 Hz hum filter, low cut, browser noise suppression).
+- **Import & edit audio** (section 6): import WAV, MP3, M4A/AAC, OGG/Opus,
+  WebM, MP4 or MKV (audio is taken from video files), or press **Edit** on a
+  saved recording.
+  - See the **whole recording** in an overview strip; drag its box or click
+    to move, scroll with the wheel or scroll bar, zoom, jump to a time
+    (e.g. `2:15:30`), ±10 s, and the playhead follows playback.
+  - Select by dragging, then cut / copy / paste / delete / keep only
+    selection / silence, with undo and redo.
+  - Effects on the selection (or everything): fade in/out, normalize, change
+    volume, reverse, and noise removal (optionally learned from a selection).
+  - **Check audio health** finds clipping, quiet or loud audio, noise, hum,
+    rumble, DC offset, one-sided or out-of-phase stereo and silent ends, and
+    fixes them in one click.
+  - Works on 12-hour files: decoded sound is kept in the browser's storage in
+    blocks, never all in memory; it's still there after a reload.
+- **Convert / download in other formats**: MP3, M4A (AAC, where the browser
+  can encode it, e.g. Chrome on Windows/macOS), Opus in OGG or WebM, and
+  WAV 16-bit, 24-bit or 32-bit float. From the editor, or **Convert &
+  download** on any saved recording (its sound). The MP3 encoder and the
+  WebM/MP4 muxers are loaded from jsDelivr the first time they're used.
 - **Binaural-beat meter**: shows the difference between the left- and
   right-ear tones (how Robert Monroe's Hemi-Sync works), with its brainwave
   band and use.
@@ -39,6 +76,26 @@ specific frequencies** when they show up in the audio.
   plus a **musical note picker** (C0–B8).
 - Live spectrum and the loudest frequency right now, with its note name.
 - "Play test tones" lets you try everything without sharing anything.
+
+## Your recordings are kept across updates
+
+Recordings, settings and audio open in the editor live in your browser's
+storage for this site, and updates to the site never remove them:
+
+- Storage changes between versions only ever add things; each update is
+  checked against data saved by every earlier version (`npm run test:upgrade`).
+- If a tab with the old version is still open, the new one asks you to close
+  it instead of showing an empty list, and finishes updating once it's closed.
+- Opening the site in another tab never touches a recording in progress.
+- The site asks the browser to never clear its storage automatically.
+- **Back up everything to a folder** (Chrome/Edge) copies every recording
+  to a folder of your choice with an index file; doing it again only copies
+  new ones. **Restore from a backup folder** puts back anything missing (for
+  example after clearing browser data or on a new computer). The auto-save
+  folder can be restored from the same way.
+
+Storage belongs to the site's address: keep using the same address (for
+example the same GitHub Pages URL), or back up and restore when it changes.
 
 ## Running it
 
@@ -74,6 +131,12 @@ microphone still works there.
 - `denoise-worklet.js`: FFT-based background noise removal.
 - `presets.js`: built-in frequency library, note helpers and brainwave bands.
 - `db.js`: saved-recordings library (IndexedDB) with crash recovery.
+- `editor.js`: the audio editor. `pcm.js`: block storage for long audio.
+- `decoders.js`: streaming import (WAV, WebM/MKV, Ogg, MP3, MP4/M4A).
+- `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
+- `health.js`: the audio health check and sound check suggestions.
+- `tap-worklet.js`: hands live audio to the sound check.
+- `tests/upgrade-check.mjs`: checks updates keep all saved data (`npm run test:upgrade`).
 
 Note: the uses listed for spiritual and Hemi-Sync frequencies are the
 traditional or popular claims attached to them, not scientifically established

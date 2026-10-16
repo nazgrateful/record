@@ -12,6 +12,7 @@
     <p class="sub">Record your screen with its internal audio and/or your microphone, with background noise removed. When a frequency you've named shows up in the audio, the app names it on screen, logs the time, and can mute it.</p>
   </header>
 
+  <div id="notice" role="status" hidden></div>
   <main>
     <section class="card" id="capture-card">
       <h2>1. Capture</h2>
@@ -26,7 +27,6 @@
       </div>
       <div class="row options">
         <label><input type="checkbox" id="opt-monitor"> Hear processed audio (use headphones)</label>
-        <label><input type="checkbox" id="opt-audio-only"> Record audio only</label>
       </div>
       <p class="hint" id="capture-hint">In the share dialog, pick a tab, window or screen and turn on <b>Share audio</b> (system audio works for whole screens on Windows/ChromeOS; on macOS and Linux, share a browser tab to get its audio). You can also record just the microphone without sharing a screen.</p>
     </section>
@@ -38,11 +38,22 @@
         <label><input type="checkbox" id="opt-dn-int"> Clean up internal audio</label>
         <label><input type="checkbox" id="opt-hp" checked> Cut low rumble (below 80 Hz, mic)</label>
         <label><input type="checkbox" id="opt-browser-ns" checked> Browser noise suppression + echo cancel (mic)</label>
+        <label>Mains hum filter
+          <select id="opt-hum">
+            <option value="0">Off</option>
+            <option value="50">50 Hz (Europe, Asia, Africa…)</option>
+            <option value="60">60 Hz (Americas…)</option>
+          </select>
+        </label>
       </div>
       <div class="sliders">
         <label>Strength <output id="out-dn-strength"></output>
           <input type="range" id="opt-dn-strength" min="0.5" max="4" step="0.1">
           <small>Higher removes more noise but can make voices sound thin.</small>
+        </label>
+        <label>Mic volume <output id="out-mic-gain"></output>
+          <input type="range" id="opt-mic-gain" min="-20" max="30" step="1">
+          <small>Boost a quiet microphone or turn down a loud one.</small>
         </label>
         <label>Max reduction <output id="out-dn-floor"></output>
           <input type="range" id="opt-dn-floor" min="-40" max="-6" step="1">
@@ -83,8 +94,38 @@
         <button id="btn-record" class="primary" disabled>● Record</button>
         <button id="btn-stop" disabled>■ Stop</button>
         <label><input type="checkbox" id="opt-burn" checked> Show names on the video</label>
-        <label id="save-disk-label"><input type="checkbox" id="opt-save-disk"> Also save to a file on my computer</label>
+        <button id="btn-soundcheck">✚ Sound check</button>
       </div>
+      <div id="soundcheck" class="health-box" hidden>
+        <div class="row"><b id="sc-step"></b> <progress id="sc-progress" max="1" value="0"></progress></div>
+        <div id="sc-summary" class="muted"></div>
+        <div id="sc-list"></div>
+      </div>
+      <div class="row options">
+        <label>Record
+          <select id="opt-mode">
+            <option value="combined">Screen with sound (one file)</option>
+            <option value="separate">Screen and sound as separate files</option>
+            <option value="audio">Sound only</option>
+            <option value="video">Screen only (no sound)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row options">
+        <label><input type="checkbox" id="opt-auto-download" checked> Download automatically when I stop</label>
+        <label id="save-folder-label"><input type="checkbox" id="opt-save-folder"> Also save automatically to a folder on my computer</label>
+        <button id="btn-pick-folder" class="small">Choose folder (e.g. Desktop)</button>
+        <span id="folder-name" class="muted"></span>
+      </div>
+      <div class="row options">
+        <label><input type="checkbox" id="opt-wake" checked> Keep the computer awake while recording</label>
+        <label>Stop automatically after
+          <input type="number" id="opt-stop-h" min="0" max="48" step="1" value="0" class="num"> h
+          <input type="number" id="opt-stop-m" min="0" max="59" step="1" value="0" class="num"> min
+        </label>
+        <span class="muted">(0 = no limit; long recordings of 12 hours and more are fine)</span>
+      </div>
+      <p class="hint" id="save-hint">Every recording is also saved on this website. "Separate files" saves the screen video (no sound) and the sound as two files that start at the same moment.</p>
     </section>
 
     <section class="card" id="targets-card">
@@ -148,9 +189,113 @@
 
     <section class="card">
       <h2>5. Saved recordings</h2>
-      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. Download them to keep copies on your computer. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
+      <p class="hint">Recordings are saved on this website automatically, written every second while you record. If the tab crashes or closes, the recording is recovered the next time you open the page. They're also downloaded automatically when you stop (if that's turned on), and can be written straight into a folder you choose, such as your Desktop. Each one also has subtitle files (.vtt / .srt) of the names detected.</p>
       <p class="hint" id="storage-info"></p>
+      <div class="row">
+        <button id="btn-backup">Back up everything to a folder…</button>
+        <button id="btn-restore">Restore from a backup folder…</button>
+      </div>
+      <p class="hint" id="backup-hint">Updates to this website never remove your recordings. A backup folder also protects them if the browser's data gets cleared or you switch computers: backing up again only copies new recordings, and restoring only adds missing ones.</p>
       <div id="recordings"><p class="muted">Nothing recorded yet.</p></div>
+    </section>
+
+    <section class="card" id="editor-card">
+      <h2>6. Import &amp; edit audio</h2>
+      <div id="ed-drop" class="drop">
+        <label class="button primary-ish"><input type="file" id="ed-file" accept="audio/*,video/*,.wav,.mp3,.m4a,.ogg,.opus,.webm,.mkv,.mp4,.flac" hidden> Import audio file…</label>
+        <span class="muted">or drop an audio or video file here (WAV, MP3, M4A, OGG/Opus, WebM, MP4…), up to 12 hours or more. You can also press <b>Edit</b> on a saved recording.</span>
+        <div class="row options">
+          <label><input type="checkbox" id="ed-mono"> Import as mono (half the space; good for very long files)</label>
+          <label><input type="checkbox" id="ed-keep-original"> Also add the original file to Saved recordings</label>
+        </div>
+      </div>
+      <div id="ed-job" class="row" hidden><span id="ed-job-label"></span> <progress id="ed-progress" max="1" value="0"></progress></div>
+
+      <div id="ed-body" hidden>
+        <div class="row ed-head">
+          <b id="ed-info"></b>
+          <span id="ed-pos" class="ed-time"></span>
+        </div>
+        <div class="label">Whole recording — drag the box or click to move</div>
+        <canvas id="ed-overview" class="ed-overview"></canvas>
+        <canvas id="ed-wave" class="ed-wave" tabindex="0" title="Drag to select · click to place the cursor · wheel to move · Ctrl/⌘+wheel to zoom"></canvas>
+        <input type="range" id="ed-scroll" class="ed-scroll" min="0" max="10000" value="0" aria-label="Move through the recording">
+        <div class="row muted ed-readout"><span id="ed-view"></span> · <span id="ed-sel"></span></div>
+
+        <div class="row">
+          <button id="ed-start" title="Go to start (Home)">⏮</button>
+          <button id="ed-back" title="Back 10 s">−10 s</button>
+          <button id="ed-play" class="primary">▶ Play</button>
+          <button id="ed-fwd" title="Forward 10 s">+10 s</button>
+          <button id="ed-end" title="Go to end (End)">⏭</button>
+          <button id="ed-play-sel">Play selection</button>
+          <input type="text" id="ed-goto" placeholder="Go to e.g. 2:15:30" class="ed-goto">
+          <button id="ed-goto-btn">Go</button>
+        </div>
+        <div class="row options">
+          <label><input type="checkbox" id="ed-loop"> Loop</label>
+          <label><input type="checkbox" id="ed-follow" checked> Follow playhead</label>
+          <label><input type="checkbox" id="ed-detect" checked> Detect named frequencies while playing</label>
+        </div>
+        <div class="row">
+          <span class="label">View</span>
+          <button id="ed-zoom-in" class="small">Zoom in (+)</button>
+          <button id="ed-zoom-out" class="small">Zoom out (−)</button>
+          <button id="ed-zoom-sel" class="small">Zoom to selection</button>
+          <button id="ed-zoom-all" class="small">Show all</button>
+        </div>
+        <div class="row">
+          <span class="label">Edit</span>
+          <button id="ed-undo" class="small">↶ Undo</button>
+          <button id="ed-redo" class="small">↷ Redo</button>
+          <button id="ed-select-all" class="small">Select all</button>
+          <button id="ed-cut" class="small">Cut</button>
+          <button id="ed-copy" class="small">Copy</button>
+          <button id="ed-paste" class="small">Paste</button>
+          <button id="ed-delete" class="small">Delete</button>
+          <button id="ed-trim" class="small">Keep only selection</button>
+          <button id="ed-silence" class="small">Silence</button>
+        </div>
+        <div class="row">
+          <span class="label">Effects</span>
+          <button id="ed-fade-in" class="small">Fade in</button>
+          <button id="ed-fade-out" class="small">Fade out</button>
+          <button id="ed-normalize" class="small">Normalize</button>
+          <input type="number" id="ed-gain" value="3" step="0.5" min="-40" max="40" class="num"> dB
+          <button id="ed-amplify" class="small">Change volume</button>
+          <button id="ed-reverse" class="small">Reverse</button>
+        </div>
+        <div class="row">
+          <span class="label">Noise</span>
+          <button id="ed-learn-noise" class="small">Learn noise from selection</button>
+          <button id="ed-denoise" class="small">Remove noise</button>
+          <span id="ed-noise-status" class="muted"></span>
+          <span class="muted">(uses the strength settings in "Background noise removal")</span>
+        </div>
+        <div class="row">
+          <span class="label">Health</span>
+          <button id="ed-health" class="small">✚ Check audio health</button>
+          <span id="ed-health-summary" class="muted"></span>
+        </div>
+        <div id="ed-health-box" class="health-box" hidden><div id="ed-health-list"></div></div>
+        <div class="row">
+          <span class="label">Save</span>
+          <input type="text" id="ed-name" class="ed-name" aria-label="File name">
+          <select id="ed-format" aria-label="File format"></select>
+          <select id="ed-bitrate" aria-label="Quality (MP3, M4A, Opus)">
+            <option value="64000">64 kbps (speech)</option>
+            <option value="96000">96 kbps</option>
+            <option value="128000" selected>128 kbps</option>
+            <option value="192000">192 kbps</option>
+            <option value="256000">256 kbps</option>
+            <option value="320000">320 kbps (best)</option>
+          </select>
+          <button id="ed-save" class="primary">Save to recordings</button>
+          <button id="ed-download">Download</button>
+          <button id="ed-close" class="small">Close</button>
+        </div>
+        <p class="hint">Keys (click the waveform first): Space play/pause · ←/→ move · Delete · Ctrl/⌘+Z undo · Ctrl/⌘+C/X/V · +/− zoom. Imported audio is kept in this website's storage, so it's still here if you reload. 12 hours of sound is about 0.4 GB as Opus, 0.7 GB as MP3 at 128 kbps or 8 GB as stereo WAV. Converting to MP3 takes about 5 minutes per hour of stereo sound (so about an hour for 12 hours); Opus and WAV are much faster.</p>
+      </div>
     </section>
   </main>
 
