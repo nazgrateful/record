@@ -6,6 +6,17 @@ specific frequencies** when they show up in the audio.
 
 ## Features
 
+- **Pick what to record** at the top: **Record screen** (video, always with
+  the computer's sound) or **Record audio** (microphone, computer sound, or
+  both).
+- **Edit screen recordings** (section 7): **Edit video** on any screen
+  recording (or open a video file). The player shows the whole picture and
+  the timeline the whole video; drag to select, cut parts out or keep only a
+  part (with undo), and preview with cuts skipped. Sound: keep it (louder or
+  quieter), remove it, or use the sound edited in the audio editor ("Edit
+  this video's sound": noise and street-noise removal, frequencies, health
+  fixes…). Save to recordings or download as MP4 or WebM; the original stays.
+- **Rename** any saved recording.
 - **Record my screen** in one click: the share window opens with the whole
   screen offered first, and recording starts as soon as you pick. Choose
   computer sound and/or your microphone, quality (720p, 1080p, 1440p, 4K or
@@ -179,6 +190,7 @@ microphone still works there.
 - `decoders.js`: streaming import (WAV, WebM/MKV, Ogg, MP3, MP4/M4A).
 - `export.js`: conversion to MP3, M4A, Opus (OGG/WebM) and WAV, streamed.
 - `tones.js`: tone / binaural-beat generator for Add frequencies.
+- `videoedit.js`: the video editor.
 - `video.js`: screen-recording conversion to MP4/WebM (WebCodecs + muxers).
 - `stretch.js`: speed changes (time-stretch keeping pitch, and resampling).
 - `street.js`: the street-noise finder.
